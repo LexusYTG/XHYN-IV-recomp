@@ -1,3 +1,4 @@
+#include <cstdio>
 // sub_82A46D70(device r3, out r4) writes {0, submitted frame, submitted -
 // completed} for the device. Its only caller, sub_828BF420, polls it in a
 // loop without sleeping while two frames are pending, i.e. while the title
@@ -114,3 +115,37 @@ extern "C" void sub_821BB6D8(PPCContext& ctx, uint8_t* base) {
   g_handler.calls.fetch_add(1);
   ProbeReport(b);
 }
+
+namespace {
+ProbeAcc g_fn[7];
+std::atomic<int64_t> g_fn_window{0};
+const char* const kFnNames[7] = {"2728","42F0","D41A8","C6620","E7000","BFC00","3E348"};
+void FnReport(int64_t now) {
+  int64_t start = g_fn_window.load();
+  if (start == 0) {
+    g_fn_window.compare_exchange_strong(start, now);
+    return;
+  }
+  if (now - start < 2000000000LL || !g_fn_window.compare_exchange_strong(start, now)) return;
+  char line[512];
+  int n = 0;
+  for (int i = 0; i < 7; ++i) {
+    const int64_t ns = g_fn[i].ns.exchange(0);
+    const uint32_t c = g_fn[i].calls.exchange(0);
+    n += std::snprintf(line + n, sizeof(line) - n, "%s=%.0fms/%u ", kFnNames[i], ns / 1e6, c);
+  }
+  __android_log_print(ANDROID_LOG_WARN, "FNPROBE", "%s window=%.0fms", line, (now - start) / 1e6);
+}
+}  // namespace
+
+#define PROBE_FN(NAME, IDX) \
+  extern "C" void NAME(PPCContext& ctx, uint8_t* base) { \
+    const int64_t a = NowNs(); \
+    __imp__##NAME(ctx, base); \
+    const int64_t b = NowNs(); \
+    g_fn[IDX].ns.fetch_add(b - a); \
+    g_fn[IDX].calls.fetch_add(1); \
+    FnReport(b); \
+  }
+PROBE_FN(sub_82902728, 0)
+PROBE_FN(sub_828C42F0, 1)

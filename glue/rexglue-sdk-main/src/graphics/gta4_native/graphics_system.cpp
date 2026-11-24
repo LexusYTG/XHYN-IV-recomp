@@ -17256,13 +17256,26 @@ VkPipeline Gta4NativeGraphicsSystem::PublishNativePipeline(
   return pipeline;
 }
 
+static void PipeProbeNote(uint64_t compile_ticks, uint64_t wait_ticks) {
+  static std::atomic<uint32_t> calls{0};
+  static std::atomic<uint64_t> compile_sum{0}, wait_sum{0};
+  compile_sum.fetch_add(compile_ticks, std::memory_order_relaxed);
+  wait_sum.fetch_add(wait_ticks, std::memory_order_relaxed);
+  if (calls.fetch_add(1, std::memory_order_relaxed) % 20 == 19) {
+    REXLOG_INFO("PIPEPROBE: 20 calls compile_ticks_total={} wait_ticks_total={}",
+                compile_sum.load(std::memory_order_relaxed), wait_sum.load(std::memory_order_relaxed));
+  }
+}
+
 void Gta4NativeGraphicsSystem::RecordNativePipelineTiming(uint64_t compile_ticks,
                                                           uint64_t wait_ticks) {
   if (IsNativeGpuProfileFrameActive()) {
     auto& builder = native_gpu_profile_state_.frames[active_frame_slot_].sample_builder;
+    PipeProbeNote(compile_ticks, wait_ticks);
     builder.AddCpuRange(performance::CpuRange::kPipelineCompileJobs, compile_ticks);
     builder.AddCpuRange(performance::CpuRange::kPipelineWait, wait_ticks);
   } else {
+    PipeProbeNote(compile_ticks, wait_ticks);
     native_pipeline_unreported_compile_ticks_ += compile_ticks;
     native_pipeline_unreported_wait_ticks_ += wait_ticks;
   }
@@ -22311,6 +22324,8 @@ VkPipeline Gta4NativeGraphicsSystem::GetOrCreatePipeline(
     }
   }
   if (fragment_coverage_requested && !use_late_module) {
+    static std::atomic<uint32_t> s_reject_logs{0};
+    if (s_reject_logs.fetch_add(1, std::memory_order_relaxed) < 20)
     REXLOG_ERROR(
         "gta4-native: rejecting fragment coverage pipeline ps={:016X} function={} "
         "alpha-to-mask={:03X} capability={:08X} late-module={}",

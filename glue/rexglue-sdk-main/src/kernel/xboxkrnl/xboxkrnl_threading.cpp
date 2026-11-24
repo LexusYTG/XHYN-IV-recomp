@@ -998,6 +998,9 @@ struct WaitProbe {
 #endif
 }  // namespace
 
+REXCVAR_DEFINE_UINT32(gta4_sem_timeout_ms, 0, "GTA IV/Performance",
+                      "Max wait in ms on the render semaphore F8000044 (0 = off)");
+
 u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertable,
                                   mapped_u64 timeout_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
@@ -1006,7 +1009,14 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
     WaitProbe probe_single("single", object_handle, 1, timeout_ptr ? &timeout : nullptr);
-    result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+    uint64_t capped = 0;
+    uint64_t* eff = timeout_ptr ? &timeout : nullptr;
+    const uint32_t cap_ms = REXCVAR_GET(gta4_sem_timeout_ms);
+    if (cap_ms && !timeout_ptr && object_handle == 0xF8000044u) {
+      capped = static_cast<uint64_t>(-static_cast<int64_t>(cap_ms) * 10000);
+      eff = &capped;
+    }
+    result = object->Wait(3, wait_mode, alertable, eff);
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
     }
