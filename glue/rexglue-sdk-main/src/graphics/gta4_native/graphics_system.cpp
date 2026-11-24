@@ -6139,6 +6139,9 @@ void Gta4NativeGraphicsSystem::TraceModernShaderDraw(
 }
 
 void Gta4NativeGraphicsSystem::RenderWorkerMain() {
+#if REX_PLATFORM_ANDROID
+  pthread_setname_np(pthread_self(), "GtaRender");
+#endif
   std::vector<std::pair<RenderPhase, uint32_t>> render_phase_stack;
   uint64_t startup_texture_lock_count = 0;
   bool startup_present_follows_texture_lock_flush = false;
@@ -30969,7 +30972,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
   const auto shadow_map_draw = [](const NativeCommand& command) {
     const SurfaceDescriptor& depth = command.snapshot_depth_stencil;
     return command.snapshot_render_targets[0].width == 0 && depth.handle &&
-           depth.width >= 256 && depth.width == depth.height;
+           true;
   };
   const bool lazy_resolves = REXCVAR_GET(gta4_native_lazy_resolves) && !diagnostic_frame &&
                              !fire_frame_ && !force_content_probe;

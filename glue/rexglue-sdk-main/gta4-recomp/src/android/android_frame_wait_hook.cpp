@@ -78,3 +78,39 @@ extern "C" void sub_82A46D70(PPCContext& ctx, uint8_t* base) {
     nanosleep(&delay, nullptr);
   }
 }
+
+namespace {
+struct ProbeAcc {
+  std::atomic<int64_t> ns{0};
+  std::atomic<uint32_t> calls{0};
+};
+ProbeAcc g_loop, g_handler;
+std::atomic<int64_t> g_window{0};
+int64_t NowNs() {
+  timespec t{};
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return int64_t(t.tv_sec) * 1000000000LL + t.tv_nsec;
+}
+void ProbeReport(int64_t now) {
+  int64_t start = g_window.load();
+  if (start == 0) {
+    g_window.compare_exchange_strong(start, now);
+    return;
+  }
+  if (now - start < 2000000000LL || !g_window.compare_exchange_strong(start, now)) return;
+  const int64_t ln = g_loop.ns.exchange(0), hn = g_handler.ns.exchange(0);
+  const uint32_t lc = g_loop.calls.exchange(0), hc = g_handler.calls.exchange(0);
+  __android_log_print(ANDROID_LOG_WARN, "BRANCHPROBE",
+                      "loop calls=%u total=%.1fms | handler calls=%u total=%.1fms | window=%.0fms",
+                      lc, ln / 1e6, hc, hn / 1e6, (now - start) / 1e6);
+}
+}  // namespace
+
+extern "C" void sub_821BB6D8(PPCContext& ctx, uint8_t* base) {
+  const int64_t a = NowNs();
+  __imp__sub_821BB6D8(ctx, base);
+  const int64_t b = NowNs();
+  g_handler.ns.fetch_add(b - a);
+  g_handler.calls.fetch_add(1);
+  ProbeReport(b);
+}

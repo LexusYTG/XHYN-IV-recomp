@@ -472,7 +472,7 @@ X_STATUS XThread::Create() {
 
   // Set the thread name based on host ID (for easier debugging).
   if (thread_name_.empty()) {
-    set_name(fmt::format("XThread{:04X}", thread_->system_id()));
+    set_name(fmt::format("XT{:08X}", creation_params_.start_address));
   }
 
   if (creation_params_.creation_flags & 0x60) {

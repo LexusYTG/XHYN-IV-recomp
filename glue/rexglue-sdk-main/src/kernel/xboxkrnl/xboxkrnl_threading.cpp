@@ -12,6 +12,14 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <pthread.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -629,7 +637,28 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
   return result;
 }
 
+namespace {
+void SignalProbe(const char* kind, uint32_t handle) {
+#if defined(__ANDROID__)
+  if (handle != 0xF8000044u) return;
+  static std::atomic<int64_t> last_us{0};
+  static std::atomic<uint32_t> n{0};
+  int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t prev = last_us.exchange(now);
+  uint32_t cnt = n.fetch_add(1) + 1;
+  double dt = prev ? (now - prev) / 1000.0 : 0.0;
+  if (dt < 8.0) return;
+  char name[32] = {0};
+  pthread_getname_np(pthread_self(), name, sizeof(name));
+  __android_log_print(ANDROID_LOG_INFO, "SIGPROBE", "%s h=%08X by=%s gap=%.1fms n=%u",
+                      kind, handle, name, dt, cnt);
+#endif
+}
+}  // namespace
+
 u32 NtSetEvent_entry(u32 handle, mapped_u32 previous_state_ptr) {
+  SignalProbe("event", handle);
   return xeNtSetEvent(handle, previous_state_ptr);
 }
 
@@ -741,6 +770,7 @@ u32 NtCreateSemaphore_entry(mapped_u32 handle_ptr, mapped_void obj_attributes_pt
 }
 
 u32 NtReleaseSemaphore_entry(u32 sem_handle, u32 release_count, mapped_u32 previous_count_ptr) {
+  SignalProbe("sem", sem_handle);
   X_STATUS result = X_STATUS_SUCCESS;
   int32_t previous_count = 0;
 
@@ -936,6 +966,38 @@ u32 KeWaitForSingleObject_entry(mapped_void object_ptr, u32 wait_reason, u32 pro
   return result;
 }
 
+namespace {
+#if defined(__ANDROID__)
+struct WaitProbe {
+  const char* kind;
+  uint32_t handle;
+  uint32_t count;
+  bool has_timeout;
+  int64_t timeout;
+  std::chrono::steady_clock::time_point t0;
+  WaitProbe(const char* k, uint32_t h, uint32_t c, const uint64_t* to)
+      : kind(k), handle(h), count(c), has_timeout(to != nullptr),
+        timeout(to ? static_cast<int64_t>(*to) : 0),
+        t0(std::chrono::steady_clock::now()) {}
+  ~WaitProbe() {
+    auto ms = std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - t0).count() / 1000.0;
+    if (ms < 8.0) return;
+    char name[32] = {0};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    if (strncmp(name, "Main XThread", 12) != 0) return;
+    __android_log_print(ANDROID_LOG_INFO, "WAITPROBE",
+                        "%s h=%08X n=%u timeout=%s%lld(100ns) took=%.1fms",
+                        kind, handle, count, has_timeout ? "" : "INF/", (long long)timeout, ms);
+  }
+};
+#else
+struct WaitProbe {
+  WaitProbe(const char*, uint32_t, uint32_t, const uint64_t*) {}
+};
+#endif
+}  // namespace
+
 u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertable,
                                   mapped_u64 timeout_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
@@ -943,6 +1005,7 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    WaitProbe probe_single("single", object_handle, 1, timeout_ptr ? &timeout : nullptr);
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
@@ -995,6 +1058,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
     objects.push_back(std::move(object));
   }
 
+  WaitProbe probe_multi("multi", count ? static_cast<uint32_t>(handles[0]) : 0, count, timeout_ptr);
   auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects.data()), wait_type,
                                       6, wait_mode, alertable, timeout_ptr);
   if (alertable && result == X_STATUS_USER_APC) {
