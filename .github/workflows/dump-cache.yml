@@ -1,0 +1,19 @@
+name: Dump cache
+on: workflow_dispatch
+jobs:
+  dump:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            out/build
+            out/host-tools
+          key: android-mali-compatible-c1ee6ca584a51bf72ea5a21fe9084c898a558147
+          fail-on-cache-miss: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cache-dump
+          path: |
+            out/build
+            out/host-tools

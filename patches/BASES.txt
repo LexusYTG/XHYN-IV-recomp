@@ -1,0 +1,5 @@
+glue/rexglue-sdk-main/thirdparty/FFmpeg 0604b464c7cb4ebc94940cf1f324a3b26b87717c
+glue/rexglue-sdk-main/thirdparty/libmspack 305907723a4e7ab2018e58040059ffb5e77db837
+thirdparty/ffmpeg-core 5089f001a5442308599fbab8e35282f5ad8ccf13
+thirdparty/plume 519e3258048fe0bc65044e75fba7b1543e4c8e90
+tools/XenosRecomp fb32631ee398e46f2a113d8f9103201dbaa000b4
