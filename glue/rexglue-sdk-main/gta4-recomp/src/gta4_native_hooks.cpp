@@ -87,6 +87,8 @@ REXCVAR_DEFINE_BOOL(
     gta4_native_light_clear_x890_filler_flag, false, "GTA IV/Diagnostics",
     "Diagnostic-only removal of the authored filler-light flag from apartment bulb x890")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gta4_skip_local_lights, true, "GTA IV/Graphics/Native Renderer",
+                    "Skip the deferred point, spot and shaft light passes");
 
 namespace {
 
@@ -6421,6 +6423,14 @@ extern "C" void sub_828BE580(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_828C8A50(PPCContext& ctx, uint8_t* base) {
+  if (IsNativeMode() && ctx.lr == 0x822CFD90 && ctx.r7.u32 == 4 && ctx.r6.u32) {
+    const uint32_t blur_data = ctx.r6.u32;
+    const uint32_t blur_saved = LoadU32(base, blur_data);
+    StoreU32(base, blur_data, 0);
+    __imp__sub_828C8A50(ctx, base);
+    StoreU32(base, blur_data, blur_saved);
+    return;
+  }
   if (!IsNativeMode() || ctx.lr != kEaaParameterUploadReturnAddress || ctx.r7.u32 != 16 ||
       ctx.r8.u32 != 1 || !ctx.r6.u32) {
     __imp__sub_828C8A50(ctx, base);
@@ -6624,6 +6634,9 @@ extern "C" void sub_822072D0(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_822B0B90(PPCContext& ctx, uint8_t* base) {
+  if (IsNativeMode() && REXCVAR_GET(gta4_skip_local_lights)) {
+    return;
+  }
   ScopedNativeLightingExecution lighting_scope(
       base, 0x822B0B90, RenderExecutionStage::kDeferredLighting, LightPassRole::kNone);
   ScopedNativeLocalLightLoop trace(NativeLocalLightLoopKind::kTypeThree, ctx, base);
@@ -6631,6 +6644,9 @@ extern "C" void sub_822B0B90(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_822B0F08(PPCContext& ctx, uint8_t* base) {
+  if (IsNativeMode() && REXCVAR_GET(gta4_skip_local_lights)) {
+    return;
+  }
   ScopedNativeLightingExecution lighting_scope(
       base, 0x822B0F08, RenderExecutionStage::kDeferredLighting, LightPassRole::kNone);
   ScopedNativeLocalLightLoop trace(NativeLocalLightLoopKind::kPointSpot, ctx, base);
@@ -6638,6 +6654,9 @@ extern "C" void sub_822B0F08(PPCContext& ctx, uint8_t* base) {
 }
 
 extern "C" void sub_822B4640(PPCContext& ctx, uint8_t* base) {
+  if (IsNativeMode() && REXCVAR_GET(gta4_skip_local_lights)) {
+    return;
+  }
   ScopedNativeLightingExecution lighting_scope(
       base, 0x822B4640, RenderExecutionStage::kDeferredLighting, LightPassRole::kNone);
   ScopedNativeLocalLightLoop trace(NativeLocalLightLoopKind::kShaft, ctx, base);

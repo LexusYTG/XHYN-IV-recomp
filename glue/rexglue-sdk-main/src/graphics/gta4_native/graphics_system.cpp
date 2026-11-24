@@ -31109,6 +31109,15 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         continue;
       }
     }
+    if ((queued_command.type == CommandType::kDrawPrimitive ||
+         queued_command.type == CommandType::kDrawPrimitiveUp ||
+         queued_command.type == CommandType::kDrawIndexedPrimitive) &&
+        queued_command.pipeline_state && queued_command.pipeline_state->pixel_shader_resource) {
+      const uint64_t bloom_pass_hash = queued_command.pipeline_state->pixel_shader_resource->hash;
+      if (bloom_pass_hash == 0xE74BFC50127AFED3ull || bloom_pass_hash == 0x86CB9F8D0850ABE3ull) {
+        continue;
+      }
+    }
     if (lazy_resolves && queued_command.type == CommandType::kResolve &&
         queued_command.resolve_destination && queued_command.resolve_swap == UINT32_MAX) {
       const uint64_t generation = queued_command.resolve_destination->generation;

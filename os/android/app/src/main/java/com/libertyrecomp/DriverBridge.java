@@ -88,6 +88,11 @@ final class DriverBridge {
         if (sInitialized) {
             return sStatus;
         }
+        if (isMaliBuild()) {
+            sInitialized = true;
+            sStatus = "{\"ok\":true}";
+            return sStatus;
+        }
         String nativeDir = context.getApplicationInfo().nativeLibraryDir;
         boolean custom = TURNIP.equals(mode);
         File driverDir = new File(context.getFilesDir(), "drivers");
@@ -193,6 +198,7 @@ final class DriverBridge {
                     + json.optString("error", "unknown error");
         }
         org.json.JSONArray devices = json.optJSONArray("devices");
+        if (devices == null) return null;
         long best = 0;
         String name = "unknown GPU";
         JSONObject bestFeatures = null;
