@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Validate canonical SMAA assets and reproducibly emit embedded SPIR-V."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import re
+import shutil
+import struct
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+UPSTREAM_HASHES = {
+    "SMAA.hlsl": "4db53d92ef0b45661f8450303589ffabce93c352cae4282a6f32dd2b80efbeb9",
+    "AreaTex.h": "1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d51ee73af2",
+    "SearchTex.h": "1fac315ab5f87b60083c9b8387af17f056204d3d1bf21500f2acc5b3e8c1a37a",
+}
+QUALITY_PRESETS = ("LOW", "MEDIUM", "HIGH", "ULTRA")
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def parse_byte_array(path: Path, name: str) -> bytes:
+    source = path.read_text(encoding="utf-8")
+    match = re.search(
+        rf"static const unsigned char\s+{re.escape(name)}\[\]\s*=\s*\{{(.*?)\}};",
+        source,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise ValueError(f"{path}: missing {name}")
+    return bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", match.group(1)))
+
+
+def compile_shader(
+    compiler: str,
+    validator: str | None,
+    source: Path,
+    include_root: Path,
+    preset: str,
+    output: Path,
+) -> None:
+    subprocess.run(
+        [
+            compiler,
+            "-V",
+            "--target-env",
+            "vulkan1.1",
+            f"-I{include_root}",
+            f"-DSMAA_PRESET_{preset}=1",
+            "-S",
+            "frag",
+            str(source),
+            "-o",
+            str(output),
+        ],
+        check=True,
+    )
+    if validator:
+        subprocess.run([validator, "--target-env", "vulkan1.1", str(output)], check=True)
+
+
+def format_words(symbol: str, payload: bytes) -> str:
+    if len(payload) % struct.calcsize("<I"):
+        raise ValueError(f"{symbol}: SPIR-V byte count is not uint32 aligned")
+    words = [word[0] for word in struct.iter_unpack("<I", payload)]
+    lines = [f"inline constexpr uint32_t {symbol}[] = {{"]
+    row = []
+    for word in words:
+        row.append(f"0x{word:08X}")
+        if len(row) == 8:
+            lines.append("    " + ", ".join(row) + ",")
+            row.clear()
+    if row:
+        lines.append("    " + ", ".join(row) + ",")
+    lines.append("};")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--glslang-validator", default=shutil.which("glslangValidator"))
+    parser.add_argument("--spirv-val", default=shutil.which("spirv-val"))
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--check", type=Path)
+    args = parser.parse_args()
+
+    if not args.glslang_validator:
+        parser.error("glslangValidator was not found")
+
+    asset_root = args.repo_root / "LibertyRecompLib/postfx/smaa"
+    shader_root = args.repo_root / "glue/rexglue-sdk-main/src/graphics/gta4_native/smaa"
+    for name, expected_hash in UPSTREAM_HASHES.items():
+        path = asset_root / name
+        actual_hash = sha256(path)
+        if actual_hash != expected_hash:
+            raise ValueError(f"{path}: sha256 {actual_hash}, expected {expected_hash}")
+
+    area = parse_byte_array(asset_root / "AreaTex.h", "areaTexBytes")
+    search = parse_byte_array(asset_root / "SearchTex.h", "searchTexBytes")
+    expected_area_size = 160 * 560 * 2
+    expected_search_size = 64 * 16
+    if len(area) != expected_area_size:
+        raise ValueError(f"AreaTex byte count {len(area)}, expected {expected_area_size}")
+    if len(search) != expected_search_size:
+        raise ValueError(f"SearchTex byte count {len(search)}, expected {expected_search_size}")
+
+    shader_payloads: list[tuple[str, bytes]] = []
+    with tempfile.TemporaryDirectory(prefix="liberty-smaa-") as temporary:
+        temporary_root = Path(temporary)
+        for preset in QUALITY_PRESETS:
+            for pass_name in ("edge", "weight"):
+                source = shader_root / f"smaa_{pass_name}_ps.glsl"
+                output = temporary_root / f"{pass_name}_{preset.lower()}.spv"
+                compile_shader(
+                    args.glslang_validator,
+                    args.spirv_val,
+                    source,
+                    asset_root,
+                    preset,
+                    output,
+                )
+                shader_payloads.append((f"smaa_{pass_name}_{preset.lower()}_ps", output.read_bytes()))
+        neighborhood_output = temporary_root / "neighborhood.spv"
+        compile_shader(
+            args.glslang_validator,
+            args.spirv_val,
+            shader_root / "smaa_neighborhood_ps.glsl",
+            asset_root,
+            "HIGH",
+            neighborhood_output,
+        )
+        shader_payloads.append(("smaa_neighborhood_ps", neighborhood_output.read_bytes()))
+
+    generated = "// Generated by tools/XenosRecomp/validate_smaa_pipeline.py.\n"
+    generated += "// Canonical SMAA source: iryoku/smaa commit 71c806a838bdd7d517df19192a20f0c61b3ca29d.\n\n"
+    generated += "\n\n".join(format_words(symbol, payload) for symbol, payload in shader_payloads)
+    generated += "\n"
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(generated, encoding="utf-8")
+    if args.check:
+        if args.check.read_text(encoding="utf-8") != generated:
+            raise ValueError(f"{args.check}: generated SPIR-V is stale")
+
+    print(
+        f"validated AreaTex={len(area)} bytes SearchTex={len(search)} bytes "
+        f"shaders={len(shader_payloads)}"
+    )
+
+
+if __name__ == "__main__":
+    main()

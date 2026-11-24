@@ -1,9 +1,6 @@
 [submodule "thirdparty/ddspp"]
 	path = thirdparty/ddspp
 	url = https://github.com/redorav/ddspp.git
-[submodule "tools/XenosRecomp"]
-	path = tools/XenosRecomp
-	url = https://github.com/sonicnext-dev/XenosRecomp.git
 [submodule "tools/smaa"]
 	path = tools/smaa
 	url = https://github.com/iryoku/smaa.git
@@ -53,25 +50,12 @@
 [submodule "thirdparty/MoltenVK/SPIRV-Cross"]
 	path = thirdparty/MoltenVK/SPIRV-Cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
-[submodule "thirdparty/plume"]
-	path = thirdparty/plume
-	url = https://github.com/renderbag/plume
-[submodule "thirdparty/ffmpeg-core"]
-	path = thirdparty/ffmpeg-core
-	url = https://github.com/sonicnext-dev/ffmpeg-core
 [submodule "thirdparty/GameNetworkingSockets"]
 	path = thirdparty/GameNetworkingSockets
 	url = https://github.com/ValveSoftware/GameNetworkingSockets.git
-[submodule "glue/rexglue-sdk-main/thirdparty/libmspack"]
-	path = glue/rexglue-sdk-main/thirdparty/libmspack
-	url = https://github.com/kyz/libmspack.git
 [submodule "glue/rexglue-sdk-main/thirdparty/glslang"]
 	path = glue/rexglue-sdk-main/thirdparty/glslang
 	url = https://github.com/KhronosGroup/glslang.git
-[submodule "glue/rexglue-sdk-main/thirdparty/FFmpeg"]
-	path = glue/rexglue-sdk-main/thirdparty/FFmpeg
-	url = https://github.com/wmarti/FFmpeg.git
-	branch = xenia-ffmpeg-canary-full
 [submodule "glue/rexglue-sdk-main/thirdparty/tomlplusplus"]
 	path = glue/rexglue-sdk-main/thirdparty/tomlplusplus
 	url = https://github.com/marzer/tomlplusplus.git

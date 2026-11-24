@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "overrides": [
+    {
+      "stage": "vertex",
+      "hash": "0x0000000000000001",
+      "language": "hlsl",
+      "source": "example_vertex.hlsl",
+      "entry_point": "main",
+      "specialization_constants_mask": "0x00000000"
+    },
+    {
+      "stage": "pixel",
+      "hash": "0x0000000000000002",
+      "language": "glsl",
+      "source": "example_pixel.glsl",
+      "entry_point": "main",
+      "specialization_constants_mask": "0x00000000"
+    }
+  ]
+}
