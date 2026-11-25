@@ -167,14 +167,9 @@ public class LauncherActivity extends Activity {
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.HORIZONTAL);
         wrapper.setGravity(Gravity.CENTER);
-        wrapper.addView(githubLink("vaduur", "https://github.com/vaduur/LibertyRecompAndroid"),
+        wrapper.addView(githubLink("LexusYTG", "https://github.com/LexusYTG/XHYN-IV-recomp"),
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams forkParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        forkParams.leftMargin = dp(12);
-        wrapper.addView(githubLink("prollynotzjay (Mali Support and Extraz)",
-                "https://github.com/prollynotzjay/LibertyRecompAndroidMaliVer"), forkParams);
         return wrapper;
     }
 
@@ -552,12 +547,8 @@ public class LauncherActivity extends Activity {
         edition.setTextColor(0xF0FFFFFF);
         edition.setIncludeFontPadding(false);
         edition.setSingleLine(true);
-        try {
-            edition.setTypeface(Typeface.createFromAsset(getAssets(), "fonts/RockSalt-Regular.ttf"));
-        } catch (RuntimeException e) {
-            edition.setTypeface(Typeface.create("casual", Typeface.ITALIC));
-        }
-        edition.setRotation(-4f);
+        edition.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
+        edition.setRotation(0f);
         edition.setPivotX(0f);
         edition.setVisibility(View.INVISIBLE);
         frame.addView(edition, new android.widget.FrameLayout.LayoutParams(
@@ -1206,7 +1197,7 @@ public class LauncherActivity extends Activity {
                 }
                 mCrashText.setText(report.headline + "\n\nSaved to Android/data/" + getPackageName()
                         + "/files/crash_reports/" + report.file.getName()
-                        + "\nPlease attach it to an issue on GitHub (vaduur/LibertyRecompAndroid), "
+                        + "\nPlease attach it to an issue on GitHub (LexusYTG/XHYN-IV-recomp), "
                         + "or press Share report to send it from here.");
                 mCrashCard.setVisibility(View.VISIBLE);
             });

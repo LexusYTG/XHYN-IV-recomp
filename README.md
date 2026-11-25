@@ -121,7 +121,7 @@ For background on the port, see [docs/android/PORTING.md](docs/android/PORTING.m
 
 - [Liberty Recompiled](https://github.com/OZORDI/LibertyRecomp) by OZORDI and contributors, and the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) it is built on. Almost all of the hard work of recompiling GTA IV is theirs.
 - [LibertyRecompAndroid](https://github.com/vaduur/LibertyRecompAndroid) by vaduur, the Android port this fork descends from.
-- [LibertyRecompAndroidMaliVer](https://github.com/prollynotzjay/LibertyRecompAndroidMaliVer) by prollynotzjay, the Mali Edition: Mali support, launcher settings and overlay.
+- [LibertyRecompAndroidMaliVer](https://github.com/LexusYTG/XHYN-IV-recomp) by prollynotzjay, the Mali Edition: Mali support, launcher settings and overlay.
 - [Mesa Turnip](https://docs.mesa3d.org/drivers/freedreno.html), the open-source Adreno Vulkan driver, and [libadrenotools](https://github.com/bylaws/libadrenotools) by bylaws.
 - The Vulkan driver proxy comes from [skate3-android](https://github.com/andrewnakas/skate3-android) and [skate3-pocket](https://github.com/AlanConstantino/skate3-pocket).
 - [SDL3](https://github.com/libsdl-org/SDL) for the Android activity, input and audio.

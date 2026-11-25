@@ -105,7 +105,7 @@ Feedback and logs from other Mali / Dimensity devices are welcome in [Issues](..
 reporting, attach `Android/data/com.libertyrecomp/files/last_launch.txt` and, if the game starts,
 a log from **Play (Debug Log)** (`files/debug_logs/`).
 
-Mali Edition by [prollynotzjay](https://github.com/prollynotzjay/LibertyRecompAndroidMaliVer).
+Mali Edition by [prollynotzjay](https://github.com/LexusYTG/XHYN-IV-recomp).
 
 ---
 
