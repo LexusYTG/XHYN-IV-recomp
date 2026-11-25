@@ -110,14 +110,6 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VkPhysicalDeviceFeatures supported_features = {};
   ifn.vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
 
-  if (with_native_shader_support &&
-      properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 2, 0)) {
-    REXLOG_WARN(
-        "Vulkan device '{}' exposes API {}.{}, but Liberty native shaders require Vulkan 1.2",
-        properties.deviceName, VK_VERSION_MAJOR(properties.apiVersion),
-        VK_VERSION_MINOR(properties.apiVersion));
-    return nullptr;
-  }
   if (with_native_shader_support && !supported_features.shaderInt64) {
     REXLOG_WARN(
         "Vulkan device '{}' doesn't support shaderInt64 required by Liberty native shaders",

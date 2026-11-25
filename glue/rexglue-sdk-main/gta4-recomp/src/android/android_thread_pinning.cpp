@@ -178,7 +178,7 @@ void PinningLoop() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     int count[6] = {0, 0, 0, 0, 0, 0};
     const pid_t hot = HottestThread("XT82849940");
-    if (hot > 0) LogHot(hot);
+    
     if (DIR* directory = opendir("/proc/self/task")) {
       while (dirent* entry = readdir(directory)) {
         const pid_t tid = pid_t(std::atoi(entry->d_name));

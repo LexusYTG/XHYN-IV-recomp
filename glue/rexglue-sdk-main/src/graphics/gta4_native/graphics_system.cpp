@@ -181,7 +181,7 @@ REXCVAR_DEFINE_BOOL(gta4_native_pipeline_serialize, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_UINT32(gta4_native_max_queued_frames, 2, "GTA IV/Graphics/Native Renderer",
                       "Title frames the producer may run ahead of the recorder")
     .range(1, 4);
-REXCVAR_DEFINE_UINT32(gta4_texture_skip_mips, 0, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_UINT32(gta4_texture_skip_mips, 1, "GTA IV/Graphics/Native Renderer",
                       "Mip levels dropped from the top of CPU-uploaded 2D color textures")
     .range(0, 4);
 REXCVAR_DEFINE_UINT32(gta4_native_frame_complete_signal, 0, "GTA IV/Graphics/Native Renderer",
@@ -601,7 +601,7 @@ REXCVAR_DEFINE_UINT32(
     "Frames between native texture memory-budget pressure checks (0 checks every frame)")
     .range(0, 3600);
 REXCVAR_DEFINE_UINT32(
-    gta4_native_texture_memory_limit_mb, 0, "GTA IV/Graphics/Native Renderer",
+    gta4_native_texture_memory_limit_mb, 256, "GTA IV/Graphics/Native Renderer",
     "Optional native texture heap budget cap in MiB (0 uses the Vulkan driver budget)");
 
 namespace rex::graphics::gta4_native {
@@ -17256,26 +17256,13 @@ VkPipeline Gta4NativeGraphicsSystem::PublishNativePipeline(
   return pipeline;
 }
 
-static void PipeProbeNote(uint64_t compile_ticks, uint64_t wait_ticks) {
-  static std::atomic<uint32_t> calls{0};
-  static std::atomic<uint64_t> compile_sum{0}, wait_sum{0};
-  compile_sum.fetch_add(compile_ticks, std::memory_order_relaxed);
-  wait_sum.fetch_add(wait_ticks, std::memory_order_relaxed);
-  if (calls.fetch_add(1, std::memory_order_relaxed) % 20 == 19) {
-    REXLOG_INFO("PIPEPROBE: 20 calls compile_ticks_total={} wait_ticks_total={}",
-                compile_sum.load(std::memory_order_relaxed), wait_sum.load(std::memory_order_relaxed));
-  }
-}
-
 void Gta4NativeGraphicsSystem::RecordNativePipelineTiming(uint64_t compile_ticks,
                                                           uint64_t wait_ticks) {
   if (IsNativeGpuProfileFrameActive()) {
     auto& builder = native_gpu_profile_state_.frames[active_frame_slot_].sample_builder;
-    PipeProbeNote(compile_ticks, wait_ticks);
     builder.AddCpuRange(performance::CpuRange::kPipelineCompileJobs, compile_ticks);
     builder.AddCpuRange(performance::CpuRange::kPipelineWait, wait_ticks);
   } else {
-    PipeProbeNote(compile_ticks, wait_ticks);
     native_pipeline_unreported_compile_ticks_ += compile_ticks;
     native_pipeline_unreported_wait_ticks_ += wait_ticks;
   }
@@ -18984,8 +18971,8 @@ Gta4NativeGraphicsSystem::NativeSampler* Gta4NativeGraphicsSystem::GetOrCreateSa
   sampler_info.addressModeV = kAddressModes[uint32_t(key.clamp_v)];
   sampler_info.addressModeW = kAddressModes[uint32_t(key.clamp_w)];
   sampler_info.mipLodBias = 0.0f;
-  sampler_info.minLod = float(key.mip_min_level);
-  sampler_info.maxLod = float(key.mip_max_level);
+  sampler_info.minLod = 0.0f;
+  sampler_info.maxLod = 0.0f;
   if (key.aniso_filter != xenos::AnisoFilter::kDisabled) {
     sampler_info.anisotropyEnable = VK_TRUE;
     const float requested_anisotropy =

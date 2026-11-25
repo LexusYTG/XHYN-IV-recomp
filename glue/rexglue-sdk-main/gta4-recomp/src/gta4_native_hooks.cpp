@@ -2711,7 +2711,7 @@ void ApplyShadowDistanceScale(uint8_t* base) {
 
   std::lock_guard lock(shadow_range_mutex);
   // Fewer directional shadow cascades for CPU-bound hosts (0 keeps stock).
-  if (const uint32_t cascades = REXCVAR_GET(gta4_shadow_cascade_count); cascades != 0) {
+  if (const uint32_t cascades = 1; cascades != 0) {
     for (uint32_t context = 0; context < kNativeShadowContextCount; ++context) {
       const uint32_t address =
           kShadowQualityTable + context * kShadowQualityContextStride + kShadowQualityCascadeOffset;
@@ -7673,3 +7673,7 @@ extern "C" void sub_82A467D8(PPCContext& ctx, uint8_t* base) {
 #include "gta4_help_trace_hooks.inc"
 #include "gta4_fade_trace_hooks.inc"
 #include "gta4_phone_trace_hooks.inc"
+
+extern "C" void sub_82275B80(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }
+extern "C" void sub_82275CF8(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }
+extern "C" void sub_82275E38(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }
