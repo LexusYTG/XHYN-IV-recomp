@@ -346,13 +346,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     ready_context_words_[ready_word].fetch_or(kicked_value, std::memory_order_release);
     // Signal the decoder thread to start processing.
     work_event_->Set();
-    // Block until the worker finishes, so the game sees updated context data.
-    for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
-      if (kicked_value & 1) {
-        uint32_t context_id = base_context_id + i;
-        contexts_[context_id].WaitForWorkDone();
-      }
-    }
+    // gta4: kick is asynchronous (as on real hardware); do not wait for the decoder.
     diagnostics::gta4_transition::Record(
         diagnostics::gta4_transition::EventSource::kXma,
         diagnostics::gta4_transition::EventType::kXmaKickComplete, 0, 0, 0,
