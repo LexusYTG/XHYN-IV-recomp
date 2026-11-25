@@ -90,8 +90,13 @@ pid_t HottestThread(const char* prefix) {
       if (!close) continue;
       unsigned long utime = 0, stime = 0;
       if (std::sscanf(close + 1, " %*c %*d %*d %*d %*d %*d %*u %*lu %*lu %*lu %*lu %lu %lu", &utime, &stime) != 2) continue;
-      if (utime + stime > best_ticks) {
-        best_ticks = utime + stime;
+      static std::unordered_map<pid_t, unsigned long> last_ticks;
+      const unsigned long total = utime + stime;
+      const auto prev = last_ticks.find(tid);
+      const unsigned long delta = prev == last_ticks.end() ? 0 : total - prev->second;
+      last_ticks[tid] = total;
+      if (delta > best_ticks) {
+        best_ticks = delta;
         best = tid;
       }
     }
@@ -158,7 +163,7 @@ void PinningLoop() {
   if (cores.size() < 8) return;
   cpu_set_t main_set, recorder, audio, kernel, sdl, rest, render, xt;
   CPU_ZERO(&xt);
-  CPU_SET(cores[1], &xt);
+  CPU_SET(cores[0], &xt);
   CPU_ZERO(&render);
   CPU_SET(cores[0], &render);
   CPU_ZERO(&main_set);
@@ -167,12 +172,14 @@ void PinningLoop() {
   CPU_ZERO(&kernel);
   CPU_ZERO(&sdl);
   CPU_ZERO(&rest);
-  CPU_SET(cores[0], &main_set);
-  CPU_SET(cores[0], &recorder);
+  CPU_SET(cores[1], &main_set);
+  CPU_SET(cores[1], &recorder);
   CPU_SET(cores[6], &audio);
   CPU_SET(cores[7], &kernel);
   CPU_SET(cores[5], &sdl);
+  CPU_SET(cores[7], &sdl);
   for (int i = 2; i <= 4; ++i) CPU_SET(cores[i], &rest);
+  CPU_SET(cores[7], &rest);
   int last[6] = {-1, -1, -1, -1, -1, -1};
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(2));

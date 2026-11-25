@@ -26,7 +26,7 @@
 // Off by default: it gained nothing measurable, and the game-code crash in
 // sub_8296E480 (stale object pointer) first appeared in builds that had it;
 // changing the main thread's timing can expose game-side races.
-REXCVAR_DEFINE_BOOL(gta4_frame_wait_sleep, false, "GTA IV/Performance",
+REXCVAR_DEFINE_BOOL(gta4_frame_wait_sleep, true, "GTA IV/Performance",
                     "Sleep instead of spinning while the title waits for a frame slot");
 REXCVAR_DEFINE_UINT32(gta4_extra_frames_in_flight, 0, "GTA IV/Performance",
                       "Frames the title may run ahead beyond its own limit of two pending "

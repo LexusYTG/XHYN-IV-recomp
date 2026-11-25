@@ -138,11 +138,18 @@ void AudioSystem::WorkerThreadMain() {
 
   // Main run loop.
   uint32_t diag_pump_count = 0;
+  int64_t gta4_a_report = 0, gta4_a_wait = 0, gta4_a_cb = 0, gta4_a_cb_max = 0;
+  int64_t gta4_a_loops = 0, gta4_a_cbs = 0;
+  const auto gta4_a_now = [] {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+  };
   while (worker_running_) {
     diagnostics::gta4_transition::RecordSteady(
         diagnostics::gta4_transition::EventSource::kAudio,
         diagnostics::gta4_transition::EventType::kAudioWaitBegin);
     const uint64_t handoff_wait_begin = handoff::Enabled() ? handoff::Clock() : 0;
+    const int64_t gta4_a_t0 = gta4_a_now();
     auto result = rex::thread::WaitAny(
         wait_handles_, rex::countof(wait_handles_), true,
         std::chrono::milliseconds(500));
@@ -154,6 +161,8 @@ void AudioSystem::WorkerThreadMain() {
             : diagnostics::gta4_transition::kFlagNone,
         static_cast<uint64_t>(result.first), result.second);
     if (handoff_wait_begin) handoff::Record("audio-wait", result.second, {handoff::Clock()-handoff_wait_begin, uint64_t(result.first)});
+    gta4_a_wait += gta4_a_now() - gta4_a_t0;
+    ++gta4_a_loops;
     if (result.first == rex::thread::WaitResult::kFailed) {
       REXAPU_WARN("AudioWorker: WaitAny failed");
       continue;
@@ -211,8 +220,13 @@ void AudioSystem::WorkerThreadMain() {
             client_callback_arg);
         handoff::Span handoff_callback("guest-mixer", index, client_callback, client_callback_arg);
         uint64_t args[] = {client_callback_arg};
+        const int64_t gta4_a_cb_t0 = gta4_a_now();
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
+        const int64_t gta4_a_cb_dt = gta4_a_now() - gta4_a_cb_t0;
+        gta4_a_cb += gta4_a_cb_dt;
+        ++gta4_a_cbs;
+        if (gta4_a_cb_dt > gta4_a_cb_max) gta4_a_cb_max = gta4_a_cb_dt;
         diagnostics::gta4_transition::RecordSteady(
             diagnostics::gta4_transition::EventSource::kAudio,
             diagnostics::gta4_transition::EventType::kAudioCallbackEnd,
@@ -233,6 +247,23 @@ void AudioSystem::WorkerThreadMain() {
       break;
     }
 
+    {
+      const int64_t gta4_a_t = gta4_a_now();
+      if (gta4_a_report == 0) gta4_a_report = gta4_a_t;
+      if (gta4_a_t - gta4_a_report > 2000000000ll) {
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                            "gta4-audio: loops=%lld cbs=%lld cb_avg=%.2fms cb_max=%.2fms "
+                            "wait_avg=%.2fms over=%.2fs",
+                            (long long)gta4_a_loops, (long long)gta4_a_cbs,
+                            gta4_a_cbs ? gta4_a_cb / 1e6 / gta4_a_cbs : 0.0, gta4_a_cb_max / 1e6,
+                            gta4_a_loops ? gta4_a_wait / 1e6 / gta4_a_loops : 0.0,
+                            (gta4_a_t - gta4_a_report) / 1e9);
+#endif
+        gta4_a_report = gta4_a_t;
+        gta4_a_wait = gta4_a_cb = gta4_a_cb_max = gta4_a_loops = gta4_a_cbs = 0;
+      }
+    }
     if (!pumped) {
       SCOPE_profile_cpu_i("apu", "Sleep");
       rex::thread::Sleep(std::chrono::milliseconds(500));

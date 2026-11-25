@@ -1066,6 +1066,11 @@ class Presenter {
   std::mutex guest_output_mailbox_consumer_mutex_;
 
   std::array<GuestOutputProperties, kGuestOutputMailboxSize> guest_output_properties_;
+  // FIFO de publicaciones: las imagenes publicadas se muestran en orden.
+  std::mutex guest_output_fifo_mutex_;
+  std::array<uint32_t, kGuestOutputMailboxSize> guest_output_fifo_queue_{};
+  uint32_t guest_output_fifo_count_ = 0;
+  uint32_t guest_output_fifo_acquired_ = 0;
   // Accessible only by refreshing, whether the last refresh contained an image
   // rather than being blank.
   bool guest_output_active_last_refresh_ = false;

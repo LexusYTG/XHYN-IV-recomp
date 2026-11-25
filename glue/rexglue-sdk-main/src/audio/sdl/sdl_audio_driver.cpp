@@ -285,6 +285,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     REXAPU_ERROR("SDLAudioDriver::SDLCallback failed to allocate {} samples", sample_count);
     return;
   }
+  static uint64_t gta4_s_report = 0;
+  static int64_t gta4_s_silence = 0, gta4_s_frames = 0, gta4_s_calls = 0, gta4_s_depth = 0;
+  static float gta4_s_ratio_min = 9.0f;
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
@@ -307,7 +310,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
         driver->applied_ratio_ = driver->stretch_ratio_;
       }
     }
+    ++gta4_s_calls;
+    gta4_s_depth += int64_t(driver->frames_queued_.size());
+    if (driver->stretch_ratio_ < gta4_s_ratio_min) gta4_s_ratio_min = driver->stretch_ratio_;
     if (driver->rebuffering_) {
+      ++gta4_s_silence;
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
         sdl_callback_count++;
@@ -321,6 +328,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     } else {
       auto buffer = driver->frames_queued_.front();
       driver->frames_queued_.pop();
+      ++gta4_s_frames;
       if (REXCVAR_GET(audio_mute)) {
         std::memset(data, 0, len);
       } else {
@@ -346,6 +354,19 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       auto ret = driver->semaphore_->Release(1, nullptr);
       assert_true(ret);
       additional_amount -= len;
+    }
+  }
+  {
+    const uint64_t gta4_s_now = SDL_GetTicksNS();
+    if (gta4_s_report == 0) gta4_s_report = gta4_s_now;
+    if (gta4_s_now - gta4_s_report > 2000000000ull) {
+      REXAPU_WARN("gta4-audio-sdl: calls={} silence={} frames={} depth_avg={:.2f} ratio_min={:.2f}",
+                  gta4_s_calls, gta4_s_silence, gta4_s_frames,
+                  gta4_s_calls ? double(gta4_s_depth) / double(gta4_s_calls) : 0.0,
+                  gta4_s_ratio_min);
+      gta4_s_report = gta4_s_now;
+      gta4_s_silence = gta4_s_frames = gta4_s_calls = gta4_s_depth = 0;
+      gta4_s_ratio_min = 9.0f;
     }
   }
   SDL_stack_free(data);

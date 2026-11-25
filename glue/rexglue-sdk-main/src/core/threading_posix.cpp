@@ -6,6 +6,27 @@
  * @license     BSD 3-Clause License
  */
 
+#include <dirent.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <signal.h>
+#if defined(__ANDROID__)
+#include <jni.h>
+#include <android/log.h>
+#endif
+#include <ucontext.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 #include <rex/platform.h>
 #include <rex/thread.h>
 
@@ -218,8 +239,21 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
          0;
 }
 
+static inline uint64_t KWaitNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+static inline int KWaitTid() {
+  static thread_local int tid = int(::syscall(__NR_gettid));
+  return tid;
+}
+
 class PosixConditionBase {
  public:
+  uint64_t last_signal_ns() const { return last_signal_ns_.load(std::memory_order_relaxed); }
+  int last_signal_tid() const { return last_signal_tid_.load(std::memory_order_relaxed); }
   PosixConditionBase() {
 #if REX_PLATFORM_LINUX && !REX_PLATFORM_ANDROID  // Bionic has no robust mutexes
     // Use robust mutexes so waits can recover if owner thread terminates.
@@ -378,6 +412,8 @@ class PosixConditionBase {
   // Callers hold mutex_. Wakes every WaitMultiple currently including this
   // handle; lock order is always handle mutex_ then waiter mutex.
   void NotifyExternalWaiters() {
+    last_signal_ns_.store(KWaitNowNs(), std::memory_order_relaxed);
+    last_signal_tid_.store(KWaitTid(), std::memory_order_relaxed);
     for (ExternalWaiter* waiter : external_waiters_) {
       std::lock_guard<std::mutex> lock(waiter->mutex);
       ++waiter->generation;
@@ -395,6 +431,8 @@ class PosixConditionBase {
   std::condition_variable cond_;
   std::mutex mutex_;
   std::vector<ExternalWaiter*> external_waiters_;  // guarded by mutex_
+  std::atomic<uint64_t> last_signal_ns_{0};
+  std::atomic<int> last_signal_tid_{0};
 };
 
 // There really is no native POSIX handle for a single wait/signal construct
@@ -1080,7 +1118,419 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
 template <>
 PosixConditionHandle<Thread>::PosixConditionHandle(pthread_t thread) : handle_(thread) {}
 
+struct KWaitRec {
+  int tid = 0;
+  std::atomic<uint64_t> since_ns{0};
+  std::atomic<uintptr_t> obj{0};
+  std::atomic<uint32_t> n{0};
+  std::atomic<int> signaler_tid{0};
+};
+
+static std::mutex g_kwait_mutex;
+static std::unordered_map<int, KWaitRec*> g_kwait_recs;
+
+static bool KWaitReadThread(int tid, std::string& name, char& state, uint64_t& run_ns,
+                            int64_t& wait_ns) {
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+  FILE* f = std::fopen(path, "r");
+  if (!f) return false;
+  char buf[1024];
+  size_t len = std::fread(buf, 1, sizeof(buf) - 1, f);
+  std::fclose(f);
+  buf[len] = 0;
+  char* open_p = std::strchr(buf, '(');
+  char* close_p = std::strrchr(buf, ')');
+  if (!open_p || !close_p || close_p < open_p) return false;
+  name.assign(open_p + 1, size_t(close_p - open_p - 1));
+  unsigned long ut = 0, st = 0;
+  char sc = '?';
+  if (std::sscanf(close_p + 1, " %c %*d %*d %*d %*d %*d %*u %*lu %*lu %*lu %*lu %lu %lu", &sc,
+                  &ut, &st) < 3) {
+    return false;
+  }
+  state = sc;
+  const long hz = sysconf(_SC_CLK_TCK) > 0 ? sysconf(_SC_CLK_TCK) : 100;
+  run_ns = uint64_t(ut + st) * 1000000000ull / uint64_t(hz);
+  wait_ns = -1;
+  std::snprintf(path, sizeof(path), "/proc/self/task/%d/schedstat", tid);
+  f = std::fopen(path, "r");
+  if (f) {
+    unsigned long long r = 0, w = 0, ts = 0;
+    if (std::fscanf(f, "%llu %llu %llu", &r, &w, &ts) == 3) {
+      run_ns = r;
+      wait_ns = int64_t(w);
+    }
+    std::fclose(f);
+  }
+  return true;
+}
+
+static int KWaitLastCpu(int tid) {
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+  FILE* f = std::fopen(path, "r");
+  if (!f) return -1;
+  char buf[1024];
+  size_t len = std::fread(buf, 1, sizeof(buf) - 1, f);
+  std::fclose(f);
+  buf[len] = 0;
+  char* close_p = std::strrchr(buf, ')');
+  if (!close_p) return -1;
+  int idx = 0;
+  char* save = nullptr;
+  for (char* tok = strtok_r(close_p + 1, " ", &save); tok; tok = strtok_r(nullptr, " ", &save)) {
+    if (++idx == 37) return std::atoi(tok);
+  }
+  return -1;
+}
+
+static uint64_t KWaitAffinity(int tid) {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(tid, sizeof(set), &set) != 0) return 0;
+  uint64_t mask = 0;
+  for (int i = 0; i < 64 && i < CPU_SETSIZE; ++i) {
+    if (CPU_ISSET(i, &set)) mask |= 1ull << i;
+  }
+  return mask;
+}
+
+static std::string KWaitFreqLine(const char* leaf) {
+  std::string out;
+  const int ncpu = int(sysconf(_SC_NPROCESSORS_CONF));
+  for (int i = 0; i < ncpu && i < 32; ++i) {
+    char p[128];
+    std::snprintf(p, sizeof(p), "/sys/devices/system/cpu/cpu%d/cpufreq/%s", i, leaf);
+    FILE* ff = std::fopen(p, "r");
+    long khz = -1;
+    if (ff) {
+      if (std::fscanf(ff, "%ld", &khz) != 1) khz = -1;
+      std::fclose(ff);
+    }
+    out += std::to_string(i) + "=";
+    out += khz >= 0 ? std::to_string(khz / 1000) : std::string("n/a");
+    out += ' ';
+  }
+  return out;
+}
+
+struct KProfSample {
+  int tid;
+  uintptr_t pc;
+  uintptr_t lr;
+  uintptr_t ch[6];
+};
+static KProfSample g_kprof[1u << 16];
+static int g_kprof_pipe[2] = {-1, -1};
+static bool KProfSafeRead(uintptr_t addr, void* out, size_t len) {
+  if (g_kprof_pipe[0] < 0 || len > 64) return false;
+  const long w = ::syscall(__NR_write, g_kprof_pipe[1], reinterpret_cast<const void*>(addr), len);
+  if (w != long(len)) {
+    if (w > 0) {
+      char drain[64];
+      ::syscall(__NR_read, g_kprof_pipe[0], drain, size_t(w));
+    }
+    return false;
+  }
+  return ::syscall(__NR_read, g_kprof_pipe[0], out, len) == long(len);
+}
+static std::atomic<uint32_t> g_kprof_n{0};
+
+static void KProfHandler(int, siginfo_t*, void* ctx) {
+#if defined(__aarch64__)
+  auto* uc = static_cast<ucontext_t*>(ctx);
+  const uint32_t i = g_kprof_n.fetch_add(1, std::memory_order_relaxed);
+  KProfSample& s = g_kprof[i & 0xFFFFu];
+  s.tid = int(::syscall(__NR_gettid));
+  s.pc = uintptr_t(uc->uc_mcontext.pc);
+  s.lr = uintptr_t(uc->uc_mcontext.regs[30]);
+  for (int j = 0; j < 6; ++j) s.ch[j] = 0;
+  {
+    static std::atomic<bool> kp_lock{false};
+    while (kp_lock.exchange(true, std::memory_order_acquire)) {
+    }
+    uintptr_t fp = uintptr_t(uc->uc_mcontext.regs[29]);
+    const uintptr_t sp = uintptr_t(uc->uc_mcontext.sp);
+    int n = 0;
+    s.ch[n++] = s.lr;
+    for (int j = 0; j < 5 && fp >= sp && fp - sp < (1u << 22) && (fp & 15) == 0; ++j) {
+      uintptr_t frame[2];
+      if (!KProfSafeRead(fp, frame, 16)) break;
+      if (frame[1] != s.ch[n - 1]) s.ch[n++] = frame[1];
+      if (frame[0] <= fp) break;
+      fp = frame[0];
+    }
+    kp_lock.store(false, std::memory_order_release);
+  }
+#else
+  (void)ctx;
+#endif
+}
+
+static std::string KProfLoc(uintptr_t a) {
+  Dl_info di;
+  if (a && dladdr(reinterpret_cast<void*>(a), &di) && di.dli_fbase) {
+    const char* lib = di.dli_fname ? std::strrchr(di.dli_fname, '/') : nullptr;
+    lib = lib ? lib + 1 : (di.dli_fname ? di.dli_fname : "?");
+    char b[200];
+    if (di.dli_sname) {
+      std::snprintf(b, sizeof(b), "%s!%s", lib, di.dli_sname);
+    } else {
+      std::snprintf(b, sizeof(b), "%s+0x%lx", lib,
+                    (unsigned long)((a - uintptr_t(di.dli_fbase)) & ~uintptr_t(0xFF)));
+    }
+    return b;
+  }
+  return "?";
+}
+
+static void KProfMain() {
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  pipe2(g_kprof_pipe, O_NONBLOCK | O_CLOEXEC);
+  sa.sa_sigaction = KProfHandler;
+  sa.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGPROF, &sa, nullptr);
+  std::unordered_map<int, uint64_t> last;
+  std::unordered_map<int, std::string> names;
+  uint32_t consumed = 0;
+  const pid_t pid = getpid();
+  for (int round = 1;; ++round) {
+    std::vector<std::pair<uint64_t, int>> busy;
+    if (DIR* d = opendir("/proc/self/task")) {
+      while (dirent* e = readdir(d)) {
+        const int tid = std::atoi(e->d_name);
+        if (tid <= 0) continue;
+        std::string name;
+        char state = '?';
+        uint64_t run = 0;
+        int64_t wait = 0;
+        if (!KWaitReadThread(tid, name, state, run, wait)) continue;
+        names[tid] = name;
+        const uint64_t prev = last.count(tid) ? last[tid] : run;
+        last[tid] = run;
+        busy.emplace_back(run - prev, tid);
+      }
+      closedir(d);
+    }
+    std::sort(busy.begin(), busy.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    if (busy.size() > 12) busy.resize(12);
+    for (int k = 0; k < 250; ++k) {
+      for (const auto& b : busy) ::syscall(__NR_tgkill, pid, b.second, SIGPROF);
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+    if (round % 10 != 0) continue;
+    const uint32_t end = g_kprof_n.load(std::memory_order_relaxed);
+    uint32_t n = end - consumed;
+    if (n > 65536u) n = 65536u;
+    std::unordered_map<int, uint32_t> total;
+    std::unordered_map<std::string, uint32_t> pcs, lrs;
+    for (uint32_t i = end - n; i != end; ++i) {
+      const KProfSample& s = g_kprof[i & 0xFFFFu];
+      std::string nm = names.count(s.tid) ? names[s.tid] : std::string("?");
+      nm += "(" + std::to_string(s.tid) + ")";
+      ++total[s.tid];
+      ++pcs[nm + " | " + KProfLoc(s.pc)];
+      ++lrs[nm + " | " + KProfLoc(s.lr)];
+    }
+    consumed = end;
+    auto dump = [&](const char* tag, std::unordered_map<std::string, uint32_t>& m) {
+      std::vector<std::pair<uint32_t, std::string>> v;
+      for (auto& kv : m) v.emplace_back(kv.second, kv.first);
+      std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+      int shown = 0;
+      for (auto& e : v) {
+        if (shown++ >= 24) break;
+        REXSYS_WARN("gta4-prof: {} n={} {}", tag, e.first, e.second);
+      }
+    };
+    REXSYS_WARN("gta4-prof: ---- samples={} (10 s)", n);
+    dump("PC", pcs);
+    dump("LR", lrs);
+    {
+      std::unordered_map<std::string, uint32_t> chains;
+      for (uint32_t i = end - n; i != end; ++i) {
+        const KProfSample& s = g_kprof[i & 0xFFFFu];
+        const std::string nm0 = names.count(s.tid) ? names[s.tid] : std::string("?");
+        if (nm0.rfind("GtaRecorder", 0) && nm0.rfind("Main XThread", 0) &&
+            nm0.rfind("GtaRender", 0) && nm0.rfind("XT82849940", 0)) {
+          continue;
+        }
+        const std::string pcl = KProfLoc(s.pc);
+        if (pcl.rfind("libc.so", 0) != 0 || pcl.find("mem") != std::string::npos) continue;
+        std::string key = nm0 + "(" + std::to_string(s.tid) + ") " + pcl;
+        for (int j = 0; j < 6 && s.ch[j]; ++j) key += " <- " + KProfLoc(s.ch[j]);
+        ++chains[key];
+      }
+      dump("WAIT", chains);
+    }
+  }
+}
+
+static void KWaitDumpThreadMain() {
+  struct Prev {
+    bool seen = false;
+    uint64_t run = 0;
+    int64_t wait = 0;
+  };
+  struct Row {
+    int tid = 0;
+    std::string name;
+    char state = '?';
+    double cpu = 0, rq = -1;
+    uint64_t blocked_ms = 0;
+    uintptr_t obj = 0;
+    uint32_t n = 0;
+    int sig = 0;
+    int last_cpu = -1;
+    uint64_t aff = 0;
+  };
+  std::unordered_map<int, Prev> prev;
+  REXSYS_WARN("gta4-pend: max-MHz {}", KWaitFreqLine("cpuinfo_max_freq"));
+  uint64_t last_ns = KWaitNowNs();
+  while (true) {
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const uint64_t now = KWaitNowNs();
+    const double dt = double(now - last_ns);
+    last_ns = now;
+    std::vector<Row> rows;
+    std::unordered_map<int, std::string> names;
+    if (DIR* d = opendir("/proc/self/task")) {
+      while (dirent* e = readdir(d)) {
+        const int tid = std::atoi(e->d_name);
+        if (tid <= 0) continue;
+        Row r;
+        r.tid = tid;
+        uint64_t run = 0;
+        int64_t wait = 0;
+        if (!KWaitReadThread(tid, r.name, r.state, run, wait)) continue;
+        r.last_cpu = KWaitLastCpu(tid);
+        r.aff = KWaitAffinity(tid);
+        Prev& p = prev[tid];
+        if (p.seen) {
+          r.cpu = 100.0 * double(run - p.run) / dt;
+          if (wait >= 0 && p.wait >= 0) r.rq = 100.0 * double(wait - p.wait) / dt;
+        }
+        p.seen = true;
+        p.run = run;
+        p.wait = wait;
+        {
+          std::lock_guard<std::mutex> lock(g_kwait_mutex);
+          auto it = g_kwait_recs.find(tid);
+          if (it != g_kwait_recs.end()) {
+            const uint64_t since = it->second->since_ns.load(std::memory_order_acquire);
+            if (since && since <= now) {
+              r.blocked_ms = (now - since) / 1000000;
+              r.obj = it->second->obj.load(std::memory_order_relaxed);
+              r.n = it->second->n.load(std::memory_order_relaxed);
+              r.sig = it->second->signaler_tid.load(std::memory_order_relaxed);
+            }
+          }
+        }
+        names[tid] = r.name;
+        rows.push_back(std::move(r));
+      }
+      closedir(d);
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.cpu > b.cpu; });
+    REXSYS_WARN("gta4-pend: ---- interval={:.1f}s threads={}", dt / 1.0e9, rows.size());
+    REXSYS_WARN("gta4-pend: cur-MHz {}", KWaitFreqLine("scaling_cur_freq"));
+    int shown = 0;
+    for (const Row& r : rows) {
+      if (shown >= 14) break;
+      if (!(r.cpu >= 10.0 || r.rq >= 20.0)) continue;
+      ++shown;
+      char rq[16];
+      if (r.rq >= 0) std::snprintf(rq, sizeof(rq), "%.0f%%", r.rq);
+      else std::snprintf(rq, sizeof(rq), "n/a");
+      char blocked[200] = "";
+      if (r.blocked_ms) {
+        auto sit = names.find(r.sig);
+        std::snprintf(blocked, sizeof(blocked),
+                      " | BLOCKED %llums on=%llx n=%u usual-signaler=%s(%d)",
+                      (unsigned long long)r.blocked_ms, (unsigned long long)r.obj, r.n,
+                      sit != names.end() ? sit->second.c_str() : "?", r.sig);
+      }
+      REXSYS_WARN("gta4-pend: {} tid={} st={} cpu={:.0f}% runq={} on-cpu={} aff={:x}{}", r.name, r.tid, r.state,
+                  r.cpu, rq, r.last_cpu, r.aff, blocked);
+    }
+  }
+}
+
+static KWaitRec* KWaitCurrent() {
+  static thread_local KWaitRec* rec = []() -> KWaitRec* {
+    static std::once_flag started;
+    std::call_once(started, []() {
+      if (false) std::thread(KWaitDumpThreadMain).detach();
+      if (false) std::thread(KProfMain).detach();
+    });
+    auto* r = new KWaitRec();
+    r->tid = KWaitTid();
+    std::lock_guard<std::mutex> lock(g_kwait_mutex);
+    g_kwait_recs[r->tid] = r;
+    return r;
+  }();
+  return rec;
+}
+
+static constexpr uint64_t kKWaitLongNs = 20000000ull;
+
+static void KWaitNote(const char* kind, uint64_t t0, uint64_t now, uint64_t sig) {
+  static std::atomic<uint64_t> n_long{0}, n_late{0}, max_late_us{0};
+  const uint64_t waited = now - t0;
+  const uint64_t long_n = n_long.fetch_add(1, std::memory_order_relaxed) + 1;
+  // late = tiempo entre el Signal y el despertar. 0 si el Signal fue antes de entrar.
+  const uint64_t late = (sig >= t0 && sig <= now) ? now - sig : 0;
+  if (late >= 5000000ull) {
+    const uint64_t late_n = n_late.fetch_add(1, std::memory_order_relaxed) + 1;
+    uint64_t late_us = late / 1000, prev = max_late_us.load(std::memory_order_relaxed);
+    while (late_us > prev && !max_late_us.compare_exchange_weak(prev, late_us)) {}
+    if (late_n <= 40 || late_n % 25 == 0) {
+      char name[16] = {0};
+#if defined(__ANDROID__) || defined(__linux__)
+      pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+      REXSYS_WARN("gta4-kwait: late-wake kind={} thread={} waited-ms={:.1f} wake-latency-ms={:.1f}",
+                  kind, name, waited / 1.0e6, late / 1.0e6);
+    }
+  }
+  if (long_n % 100 == 0) {
+    REXSYS_WARN("gta4-kwait: long-waits={} late-wakes(>=5ms)={} max-late-ms={:.1f}", long_n,
+                n_late.load(std::memory_order_relaxed),
+                max_late_us.load(std::memory_order_relaxed) / 1000.0);
+  }
+}
+
+static WaitResult WaitImpl(WaitHandle* wait_handle, bool is_alertable,
+                           std::chrono::milliseconds timeout);
+
 WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
+  KWaitRec* kw_rec = KWaitCurrent();
+  const uint64_t kw_t0 = KWaitNowNs();
+  if (auto* kw_ph = dynamic_cast<PosixWaitHandle*>(wait_handle)) {
+    auto& kw_c = kw_ph->condition();
+    kw_rec->obj.store(uintptr_t(&kw_c), std::memory_order_relaxed);
+    kw_rec->n.store(1, std::memory_order_relaxed);
+    kw_rec->signaler_tid.store(kw_c.last_signal_tid(), std::memory_order_relaxed);
+  }
+  kw_rec->since_ns.store(kw_t0, std::memory_order_release);
+  const WaitResult kw_result = WaitImpl(wait_handle, is_alertable, timeout);
+  kw_rec->since_ns.store(0, std::memory_order_release);
+  if (kw_result == WaitResult::kSuccess) {
+    const uint64_t kw_now = KWaitNowNs();
+    if (kw_now - kw_t0 >= kKWaitLongNs) {
+      if (auto* ph = dynamic_cast<PosixWaitHandle*>(wait_handle)) {
+        KWaitNote("single", kw_t0, kw_now, ph->condition().last_signal_ns());
+      }
+    }
+  }
+  return kw_result;
+}
+
+static WaitResult WaitImpl(WaitHandle* wait_handle, bool is_alertable,
+                           std::chrono::milliseconds timeout) {
   auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
   if (posix_wait_handle == nullptr) {
     return WaitResult::kFailed;
@@ -1138,7 +1588,55 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
   }
 }
 
+static std::pair<WaitResult, size_t> WaitMultipleImpl(
+    WaitHandle* wait_handles[], size_t wait_handle_count, bool wait_all, bool is_alertable,
+    std::chrono::milliseconds timeout);
+
 std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wait_handle_count,
+                                           bool wait_all, bool is_alertable,
+                                           std::chrono::milliseconds timeout) {
+  KWaitRec* kw_rec = KWaitCurrent();
+  const uint64_t kw_t0 = KWaitNowNs();
+  {
+    uint64_t best_ns = 0;
+    int best_tid = 0;
+    uintptr_t first = 0;
+    for (size_t i = 0; i < wait_handle_count; ++i) {
+      if (auto* kw_ph = dynamic_cast<PosixWaitHandle*>(wait_handles[i])) {
+        auto& kw_c = kw_ph->condition();
+        if (!first) first = uintptr_t(&kw_c);
+        if (kw_c.last_signal_ns() >= best_ns) {
+          best_ns = kw_c.last_signal_ns();
+          best_tid = kw_c.last_signal_tid();
+        }
+      }
+    }
+    kw_rec->obj.store(first, std::memory_order_relaxed);
+    kw_rec->n.store(uint32_t(wait_handle_count), std::memory_order_relaxed);
+    kw_rec->signaler_tid.store(best_tid, std::memory_order_relaxed);
+  }
+  kw_rec->since_ns.store(kw_t0, std::memory_order_release);
+  auto kw_result =
+      WaitMultipleImpl(wait_handles, wait_handle_count, wait_all, is_alertable, timeout);
+  kw_rec->since_ns.store(0, std::memory_order_release);
+  if (kw_result.first == WaitResult::kSuccess) {
+    const uint64_t kw_now = KWaitNowNs();
+    if (kw_now - kw_t0 >= kKWaitLongNs) {
+      uint64_t sig = 0;
+      for (size_t i = 0; i < wait_handle_count; ++i) {
+        if (!wait_all && i != kw_result.second) continue;
+        if (auto* ph = dynamic_cast<PosixWaitHandle*>(wait_handles[i])) {
+          sig = std::max(sig, ph->condition().last_signal_ns());
+        }
+      }
+      KWaitNote(wait_all ? "all" : "any", kw_t0, kw_now, sig);
+    }
+  }
+  return kw_result;
+}
+
+static std::pair<WaitResult, size_t> WaitMultipleImpl(WaitHandle* wait_handles[],
+                                                      size_t wait_handle_count,
                                            bool wait_all, bool is_alertable,
                                            std::chrono::milliseconds timeout) {
   std::vector<PosixConditionBase*> conditions;
@@ -1461,3 +1959,42 @@ static void signal_handler(int signal, siginfo_t* /*info*/, void* /*context*/) {
 }
 
 }  // namespace rex::thread
+
+#if defined(__ANDROID__)
+extern "C" __attribute__((visibility("default"))) void LibertyShaderProgress(int done, int total) {
+  using Fn = void* (*)();
+  static Fn get_env = nullptr;
+  static Fn get_act = nullptr;
+  static bool resolved = false;
+  if (!resolved) {
+    resolved = true;
+    void* hs[3] = {dlopen("libSDL3.so", RTLD_NOW | RTLD_NOLOAD),
+                   dlopen("libSDL2.so", RTLD_NOW | RTLD_NOLOAD), RTLD_DEFAULT};
+    const char* env_names[2] = {"SDL_GetAndroidJNIEnv", "SDL_AndroidGetJNIEnv"};
+    const char* act_names[2] = {"SDL_GetAndroidActivity", "SDL_AndroidGetActivity"};
+    for (void* h : hs) {
+      if (!h) continue;
+      for (const char* n : env_names) if (!get_env) get_env = reinterpret_cast<Fn>(dlsym(h, n));
+      for (const char* n : act_names) if (!get_act) get_act = reinterpret_cast<Fn>(dlsym(h, n));
+    }
+    __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "shaderprog: sdl3=%p sdl2=%p env=%p act=%p",
+                        hs[0], hs[1], (void*)get_env, (void*)get_act);
+    if (!get_env || !get_act)
+      __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "shaderprog: SDL JNI symbols not found");
+  }
+  if (!get_env || !get_act) return;
+  JNIEnv* env = static_cast<JNIEnv*>(get_env());
+  if (!env) return;
+  jobject act = static_cast<jobject>(get_act());
+  if (!act) return;
+  jclass cls = env->GetObjectClass(act);
+  jmethodID m = cls ? env->GetStaticMethodID(cls, "shaderProgress", "(II)V") : nullptr;
+  if (m) env->CallStaticVoidMethod(cls, m, static_cast<jint>(done), static_cast<jint>(total));
+  else __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp", "shaderprog: method not found");
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  if (cls) env->DeleteLocalRef(cls);
+  env->DeleteLocalRef(act);
+}
+#else
+extern "C" void LibertyShaderProgress(int, int) {}
+#endif

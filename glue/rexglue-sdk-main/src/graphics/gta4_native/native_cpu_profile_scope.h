@@ -85,7 +85,7 @@ class CpuRecorderBinding {
 };
 template <typename Fn>
 decltype(auto) CpuCall(CpuOp op, Fn&& fn) {
-  CpuScope scope(op);
+  (void)op;
   return std::forward<Fn>(fn)();
 }
 inline uint64_t CalibrateCpuClock() {

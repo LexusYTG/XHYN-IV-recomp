@@ -54,11 +54,11 @@ android {
         minSdk        = 29
         targetSdk     = 34
         // Higher than every earlier build (upstream 0.5.9 is 16), so it installs as an update.
-        versionCode   = 23
+        versionCode   = 24
         // Shown as e.g. 0.5.9-mali-alpha-1.5. The workflow reads both the
         // base version and versionSuffix to name the APK.
         val versionSuffix = "-alpha-1.9"
-        versionName   = "0.5.9" + (if (libertyGpu == "mali") "-mali" else "") + versionSuffix
+        versionName   = "Experimental 2"
 
         // Read by DriverBridge.defaultMode(): the driver used when driver.txt
         // does not exist yet.

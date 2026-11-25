@@ -231,7 +231,7 @@ public class LauncherActivity extends Activity {
         // Left: banner, status, Play.
         LinearLayout left = new LinearLayout(this);
         left.setOrientation(LinearLayout.VERTICAL);
-        left.setGravity(Gravity.CENTER_HORIZONTAL);
+        left.setGravity(Gravity.CENTER);
         ImageView banner = new ImageView(this);
         banner.setImageResource(R.drawable.launcher_banner);
         banner.setAdjustViewBounds(true);
@@ -269,22 +269,22 @@ public class LauncherActivity extends Activity {
         mPlay.setBackground(focusBackground(0xFFE6E6E6));
         mPlay.setContentDescription("Play");
         mPlay.setFocusable(true);
-        mPlay.setOnClickListener(v -> play(false));
+        mPlay.setOnClickListener(v -> play(playWithLog()));
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(dp(260), dp(72));
         playParams.topMargin = dp(18);
         left.addView(mPlay, playParams);
 
-        Button debugPlay = button("Play (Debug Log)", false);
-        debugPlay.setOnClickListener(v -> play(true));
-        LinearLayout.LayoutParams debugParams = new LinearLayout.LayoutParams(dp(260), dp(44));
-        debugParams.topMargin = dp(10);
-        left.addView(debugPlay, debugParams);
+        Button openSettingsLeft = button("Settings", false);
+        openSettingsLeft.setOnClickListener(v -> showSettings(true));
+        LinearLayout.LayoutParams leftSettingsParams = new LinearLayout.LayoutParams(dp(260), dp(44));
+        leftSettingsParams.topMargin = dp(10);
+        left.addView(openSettingsLeft, leftSettingsParams);
 
-        Button perfTest = button("Performance test settings", false);
-        perfTest.setOnClickListener(v -> showPerformanceTestSettings());
-        LinearLayout.LayoutParams perfParams = new LinearLayout.LayoutParams(dp(260), dp(44));
-        perfParams.topMargin = dp(10);
-        left.addView(perfTest, perfParams);
+        Button exitButton = button("Exit", false);
+        exitButton.setOnClickListener(v -> finishAffinity());
+        LinearLayout.LayoutParams exitParams = new LinearLayout.LayoutParams(dp(260), dp(44));
+        exitParams.topMargin = dp(10);
+        left.addView(exitButton, exitParams);
 
         TextView debugNote = text("The debug log is saved to Android/data/" + getPackageName()
                 + "/files/" + DebugLog.DIRECTORY + "/. Attach the newest one when you open an issue "
@@ -299,6 +299,7 @@ public class LauncherActivity extends Activity {
         left.addView(buildGithubFooter(), matchWrap(dp(16)));
 
         ScrollView leftScroll = new ScrollView(this);
+        leftScroll.setFillViewport(true);
         leftScroll.addView(left);
         // Focusing Play scrolls the column down to it; start at the banner.
         leftScroll.post(() -> leftScroll.scrollTo(0, 0));
@@ -341,31 +342,138 @@ public class LauncherActivity extends Activity {
                 + "falls back to the device's own driver.", 12, R.color.picker_muted),
                 matchWrap(dp(10)));
 
-        LinearLayout home = new LinearLayout(this);
-        home.setOrientation(LinearLayout.VERTICAL);
-        home.addView(buildInstallCard());
-        Button openSettings = button("Settings", true);
-        openSettings.setOnClickListener(v -> showSettings(true));
-        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-        settingsParams.topMargin = dp(14);
-        home.addView(openSettings, settingsParams);
-        ScrollView rightScroll = new ScrollView(this);
-        mRightScroll = rightScroll;
-        rightScroll.addView(home);
-        mHomePage = rightScroll;
-        mSettingsPage = buildSettingsPage(right);
-        mSettingsPage.setVisibility(View.GONE);
+        View installCard = buildInstallCard();
+        mSettingsPage = buildSimpleSettingsPage(right, installCard, buildOverlayCardLive());
         FrameLayout pages = new FrameLayout(this);
-        pages.addView(mHomePage, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         pages.addView(mSettingsPage, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        pages.setVisibility(View.GONE);
+        mPages = pages;
+        mRoot = root;
         LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         rightParams.leftMargin = dp(20);
         root.addView(pages, rightParams);
         return root;
+    }
+
+    private LinearLayout mRoot;
+    private FrameLayout mPages;
+
+    private View buildOverlayCardLive() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(12), dp(16), dp(12));
+        card.setBackground(rounded(color(R.color.picker_card), dp(16)));
+        TextView title = text("Performance overlay", 18, R.color.picker_text);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(title);
+        card.addView(text("A small box in the top-left corner during gameplay. Changes apply "
+                + "the next time you press Play.", 12, R.color.picker_muted), matchWrap(dp(2)));
+        java.util.Set<String> enabled = readOverlaySettings();
+        for (int i = 0; i < OVERLAY_OPTIONS.length; ++i) {
+            CheckBox box = new CheckBox(this);
+            box.setText(OVERLAY_OPTIONS[i][1]);
+            box.setTextColor(color(R.color.picker_text));
+            box.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            box.setChecked(enabled.contains(OVERLAY_OPTIONS[i][0]));
+            box.setFocusable(true);
+            mOverlayBoxes[i] = box;
+            box.setOnCheckedChangeListener((view, checked) -> writeOverlaySettings());
+            card.addView(box, matchWrap(dp(4)));
+            TextView note = text(OVERLAY_OPTIONS[i][2], 11, R.color.picker_muted);
+            note.setPadding(dp(32), 0, 0, 0);
+            card.addView(note);
+        }
+        return card;
+    }
+
+    private static final String LAUNCHER_PREFS = "launcher";
+    private static final String PREF_PLAY_WITH_LOG = "play_with_log";
+
+    private boolean playWithLog() {
+        return getSharedPreferences(LAUNCHER_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(PREF_PLAY_WITH_LOG, false);
+    }
+
+    private View buildSimpleSettingsPage(View driverCard, View installCard, View overlayCard) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        Button back = button("Back", false);
+        back.setOnClickListener(v -> showSettings(false));
+        header.addView(back, new LinearLayout.LayoutParams(dp(96), dp(44)));
+        TextView title = text("Settings", 26, R.color.picker_text);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding(dp(14), 0, 0, 0);
+        header.addView(title);
+        page.addView(header);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        CheckBox withLog = styledCheck("Play with log",
+                "Every Play records a debug log.", playWithLog());
+        withLog.setOnCheckedChangeListener((button, checked) ->
+                getSharedPreferences(LAUNCHER_PREFS, Context.MODE_PRIVATE).edit()
+                        .putBoolean(PREF_PLAY_WITH_LOG, checked).apply());
+        body.addView(withLog, matchWrap(dp(10)));
+
+        Button export = button("Export log", false);
+        export.setOnClickListener(v -> exportLog());
+        LinearLayout.LayoutParams exportParams = new LinearLayout.LayoutParams(dp(260), dp(48));
+        exportParams.topMargin = dp(10);
+        body.addView(export, exportParams);
+
+        body.addView(installCard, matchWrap(dp(14)));
+        body.addView(overlayCard, matchWrap(dp(14)));
+        body.addView(driverCard, matchWrap(dp(14)));
+
+        ScrollView content = new ScrollView(this);
+        mRightScroll = content;
+        content.addView(body);
+        LinearLayout.LayoutParams contentParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        contentParams.topMargin = dp(10);
+        page.addView(content, contentParams);
+        return page;
+    }
+
+    private void exportLog() {
+        File[] logs = new File(mDataRoot, DebugLog.DIRECTORY).listFiles();
+        File newest = null;
+        if (logs != null) {
+            for (File file : logs) {
+                if (file.isFile() && (newest == null || file.lastModified() > newest.lastModified())) {
+                    newest = file;
+                }
+            }
+        }
+        if (newest == null) {
+            toast("No log yet. Turn on Play with log and play.");
+            return;
+        }
+        byte[] data;
+        try (java.io.RandomAccessFile file = new java.io.RandomAccessFile(newest, "r")) {
+            int length = (int) Math.min(file.length(), 100000L);
+            data = new byte[length];
+            file.seek(file.length() - length);
+            file.readFully(data);
+        } catch (IOException e) {
+            toast("Could not read the log: " + e.getMessage());
+            return;
+        }
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_SUBJECT, "Liberty Recompiled log: " + newest.getName());
+        send.putExtra(Intent.EXTRA_TEXT, new String(data, StandardCharsets.UTF_8));
+        try {
+            startActivity(Intent.createChooser(send, "Export log"));
+        } catch (Exception e) {
+            toast("No app to share with. The log is in " + newest.getAbsolutePath());
+        }
     }
 
     private String versionLine() {
@@ -635,12 +743,14 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean settingsVisible() {
-        return mSettingsPage != null && mSettingsPage.getVisibility() == View.VISIBLE;
+        return mPages != null && mPages.getVisibility() == View.VISIBLE;
     }
 
     private void showSettings(boolean show) {
-        mHomePage.setVisibility(show ? View.GONE : View.VISIBLE);
-        mSettingsPage.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (mRoot == null || mPages == null) return;
+        android.transition.TransitionManager.beginDelayedTransition(mRoot,
+                new android.transition.AutoTransition());
+        mPages.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     @Override
@@ -1282,6 +1392,7 @@ public class LauncherActivity extends Activity {
         mProgress.setVisibility(running ? View.VISIBLE : View.GONE);
         if (!running) mProgressText.setText("");
         mPlay.setAlpha(mInstalled && !running ? 1f : 0.5f);
+        if ((!mInstalled || running) && !settingsVisible()) showSettings(true);
     }
 
     /** Sources found in files/install/ fill empty rows: the first .iso and the largest other file. */
@@ -1849,21 +1960,13 @@ public class LauncherActivity extends Activity {
         new Thread(() -> {
             // A game process from an earlier session keeps the driver it
             // started with; end it so this launch uses the current choice.
+            new File(mDataRoot, LibertyActivity.GRAPHICS_FILE).delete();
             stopGameProcess();
             DebugLog.stopLeftovers(mDataRoot);
             mMain.post(() -> {
                 setBusy(false, null);
                 Intent intent = new Intent(this, LibertyActivity.class);
                 if (debugLog) intent.putExtra(LibertyActivity.EXTRA_DEBUG_LOG, true);
-                android.content.SharedPreferences perf = perfTestPreferences();
-                intent.putExtra(LibertyActivity.EXTRA_SHADOWS_OFF, perf.getBoolean(PERF_SHADOWS_OFF, false));
-                intent.putExtra(LibertyActivity.EXTRA_HALF_DRAW_DISTANCE,
-                        perf.getBoolean(PERF_HALF_DRAW_DISTANCE, false));
-                intent.putExtra(LibertyActivity.EXTRA_GPU_TURBO, perf.getBoolean(PERF_GPU_TURBO, false));
-                intent.putExtra(LibertyActivity.EXTRA_WATER_REFLECTION_INTERVAL,
-                        perf.getInt(PERF_WATER_REFLECTIONS, 1));
-                intent.putExtra(LibertyActivity.EXTRA_OTHER_REFLECTION_INTERVAL,
-                        perf.getInt(PERF_OTHER_REFLECTIONS, 1));
                 startActivity(intent);
             });
         }, "LaunchGame").start();

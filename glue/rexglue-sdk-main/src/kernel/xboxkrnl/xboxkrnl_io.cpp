@@ -32,6 +32,8 @@
 #include <new>
 #include <atomic>
 #include <chrono>
+#include <cstring>
+#include <sys/prctl.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
 #endif
@@ -77,6 +79,64 @@ void TelemetryEnd(int64_t begin_ns, uint32_t bytes, bool async) {
 #endif
   }
 }
+
+struct IoThreadStats {
+  std::atomic<uint64_t> calls[2][3]{};
+  std::atomic<uint64_t> ns[2][3]{};
+  std::atomic<uint64_t> max_ns[2]{};
+  std::atomic<int64_t> last_report_ns{0};
+};
+IoThreadStats g_io_thread_stats;
+int IoThreadBucket() {
+  char name[20] = {};
+  prctl(PR_GET_NAME, name, 0, 0, 0);
+  if (!std::strncmp(name, "GtaRender", 9)) return 0;
+  if (!std::strncmp(name, "Main XThread", 12)) return 1;
+  return -1;
+}
+struct IoScope {
+  int op;
+  int bucket;
+  int64_t begin;
+  explicit IoScope(int o) : op(o), bucket(IoThreadBucket()), begin(0) {
+    if (bucket >= 0) begin = TelemetryNowNs();
+  }
+  ~IoScope() {
+    if (bucket < 0) return;
+    auto& t = g_io_thread_stats;
+    const int64_t now = TelemetryNowNs();
+    const uint64_t d = uint64_t(now - begin);
+    t.calls[bucket][op].fetch_add(1);
+    t.ns[bucket][op].fetch_add(d);
+    uint64_t seen = t.max_ns[bucket].load();
+    while (d > seen && !t.max_ns[bucket].compare_exchange_weak(seen, d)) {}
+    int64_t last = t.last_report_ns.load();
+    if (last == 0) {
+      t.last_report_ns.compare_exchange_strong(last, now);
+      return;
+    }
+    if (now - last > 2000000000ll && t.last_report_ns.compare_exchange_strong(last, now)) {
+      uint64_t c[2][3], n[2][3], m[2];
+      for (int b = 0; b < 2; ++b) {
+        m[b] = t.max_ns[b].exchange(0);
+        for (int k = 0; k < 3; ++k) {
+          c[b][k] = t.calls[b][k].exchange(0);
+          n[b][k] = t.ns[b][k].exchange(0);
+        }
+      }
+#if defined(__ANDROID__)
+      static const char* tag[2] = {"Render", "Main"};
+      for (int b = 0; b < 2; ++b) {
+        __android_log_print(ANDROID_LOG_WARN, "LibertyRecomp",
+                            "gta4-io: %s create=%llu/%.1fms read=%llu/%.1fms scatter=%llu/%.1fms max=%.1fms",
+                            tag[b], (unsigned long long)c[b][0], n[b][0] / 1e6,
+                            (unsigned long long)c[b][1], n[b][1] / 1e6,
+                            (unsigned long long)c[b][2], n[b][2] / 1e6, m[b] / 1e6);
+      }
+#endif
+    }
+  }
+};
 }  // namespace
 
 namespace rex::kernel::xboxkrnl {
@@ -226,6 +286,7 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
                        ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block, mapped_u64 allocation_size_ptr,
                        u32 file_attributes, u32 share_access, u32 creation_disposition,
                        u32 create_options) {
+  IoScope io_scope_(0);
   // note used. maybe later
   // uint64_t allocation_size = 0;  // is this correct???
   // if (allocation_size_ptr) {
@@ -308,6 +369,7 @@ u32 NtOpenFile_entry(mapped_u32 handle_out, u32 desired_access,
 u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_ptr,
                      mapped_void apc_context, ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block,
                      mapped_void buffer, u32 buffer_length, mapped_u64 byte_offset_ptr) {
+  IoScope io_scope_(1);
   const uint64_t byte_offset =
       byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : file_io::kUseCurrentPosition;
   const uint32_t apc_routine = static_cast<uint32_t>(apc_routine_ptr) & ~1u;
@@ -404,6 +466,7 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
 u32 NtReadFileScatter_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_ptr,
                             mapped_void apc_context, ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block,
                             mapped_u32 segment_array, u32 length, mapped_u64 byte_offset_ptr) {
+  IoScope io_scope_(2);
   auto file = REX_KERNEL_OBJECTS()->LookupObject<XFile>(file_handle);
   if (!file) {
     if (io_status_block) {

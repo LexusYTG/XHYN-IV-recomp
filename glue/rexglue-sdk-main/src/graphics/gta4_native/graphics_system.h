@@ -1,8 +1,4 @@
 #pragma once
-#include <condition_variable>
-#include <mutex>
-#include <optional>
-#include <thread>
 
 #include "native_triangle_fan.h"
 #include "native_vertex_cache.h"
@@ -1509,41 +1505,6 @@ class Gta4NativeGraphicsSystem final : public system::IGraphicsSystem {
   bool CreateNativeUploadBuffer(VkDeviceSize capacity, NativeUploadBuffer& upload_buffer,
                                 bool prefer_cached = false);
   void DestroyNativeUploadBuffer(NativeUploadBuffer& upload_buffer);
-  // Frame generation: CPU blend of two real frames (fp16 RGBA), presented from its own thread.
-  struct FrameGenJob {
-    int a = -1;
-    int b = 0;
-    uint32_t width = 0, height = 0, display_width = 0, display_height = 0, frame = 0;
-    double interval_ns = 33000000.0;
-    uint64_t post_ns = 0;
-  };
-  struct FrameGenState {
-    static constexpr uint32_t kSlots = 4;
-    NativeUploadBuffer buffers[kSlots + 1];  // [0..kSlots-1] readback, [kSlots] blend
-    uint64_t slot_submission[kSlots] = {};
-    uint32_t alloc_w = 0, alloc_h = 0;
-    uint32_t write_slot = 0;
-    uint32_t hist[3] = {0, 0, 0};
-    uint32_t hist_count = 0;
-    bool deferred = false, pending = false;
-    uint64_t readback_submission = 0, upload_submission = 0, last_record_ns = 0;
-    uint32_t width = 0, height = 0, display_width = 0, display_height = 0, submitted_frame = 0;
-    double interval_ns = 33000000.0;
-    VkCommandPool pool = VK_NULL_HANDLE;
-    VkCommandBuffer cb = VK_NULL_HANDLE;
-    std::shared_ptr<ui::vulkan::VulkanSubmissionTracker> tracker;
-    std::thread thread;
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::optional<FrameGenJob> job;
-    bool stop = false;
-  } framegen_;
-  std::mutex framegen_refresh_mutex_;
-  bool FrameGenEnsureBuffers(uint32_t width, uint32_t height);
-  bool FrameGenUpload(uint32_t buffer_index, const FrameGenJob& job);
-  void FrameGenThreadMain();
-  void FrameGenShutdown();
-  void FrameGenPresentPending();
   bool EnsureFrameUploadCapacityFast(
       const std::shared_ptr<const NativeTextureResource>& present_source);
   struct CapacityVertexKey {

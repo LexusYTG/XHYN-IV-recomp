@@ -88,6 +88,53 @@ public class LibertyActivity extends SDLActivity {
         super.onCreate(savedInstanceState);
         // A controller-driven game sends no touch events for minutes at a time.
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        sInstance = this;
+    }
+
+    static volatile LibertyActivity sInstance;
+    private android.widget.LinearLayout mShaderOverlay;
+    private android.widget.ProgressBar mShaderBar;
+    private android.widget.TextView mShaderText;
+
+    /** Llamado desde el nativo (JNI) durante la precarga de shaders. */
+    public static void shaderProgress(final int done, final int total) {
+        final LibertyActivity a = sInstance;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() { a.updateShaderOverlay(done, total); }
+        });
+    }
+
+    private void updateShaderOverlay(int done, int total) {
+        if (done >= total) {
+            if (mShaderOverlay != null) {
+                android.view.ViewParent p = mShaderOverlay.getParent();
+                if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(mShaderOverlay);
+                mShaderOverlay = null;
+            }
+            return;
+        }
+        if (mShaderOverlay == null) {
+            mShaderOverlay = new android.widget.LinearLayout(this);
+            mShaderOverlay.setOrientation(android.widget.LinearLayout.VERTICAL);
+            mShaderOverlay.setGravity(android.view.Gravity.CENTER);
+            mShaderOverlay.setBackgroundColor(0xFF000000);
+            mShaderOverlay.setPadding(80, 0, 80, 0);
+            mShaderText = new android.widget.TextView(this);
+            mShaderText.setTextColor(0xFFFFFFFF);
+            mShaderText.setTextSize(18);
+            mShaderText.setGravity(android.view.Gravity.CENTER);
+            mShaderBar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            mShaderOverlay.addView(mShaderText, new android.widget.LinearLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+            mShaderOverlay.addView(mShaderBar, new android.widget.LinearLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+            addContentView(mShaderOverlay, new android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        mShaderBar.setMax(total);
+        mShaderBar.setProgress(done);
+        mShaderText.setText("Compilando shaders\ncompilados: " + done + "\npendientes: " + (total - done));
     }
 
     /**
