@@ -13,6 +13,7 @@ add_library(rexaudio OBJECT
     # SDL backend
     sdl/sdl_audio_system.cpp
     sdl/sdl_audio_driver.cpp
+    sdl/aaudio_driver.cpp
 )
 add_library(rex::audio ALIAS rexaudio)
 
@@ -30,7 +31,7 @@ target_include_directories(rexaudio PUBLIC
 )
 
 target_link_libraries(rexaudio
-    PUBLIC rexcore SDL3::SDL3
+    PUBLIC rexcore SDL3::SDL3 aaudio
     PRIVATE libavcodec libavutil
 )
 

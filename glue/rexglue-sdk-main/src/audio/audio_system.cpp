@@ -1,3 +1,7 @@
+#include <sched.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <time.h>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -138,6 +142,16 @@ void AudioSystem::WorkerThreadMain() {
 
   // Main run loop.
   uint32_t diag_pump_count = 0;
+#if defined(__ANDROID__)
+  {
+    cpu_set_t gta4_set;
+    CPU_ZERO(&gta4_set);
+    CPU_SET(6, &gta4_set);
+    CPU_SET(7, &gta4_set);
+    sched_setaffinity(0, sizeof(gta4_set), &gta4_set);
+    setpriority(PRIO_PROCESS, gettid(), -16);
+  }
+#endif
   int64_t gta4_a_report = 0, gta4_a_wait = 0, gta4_a_cb = 0, gta4_a_cb_max = 0;
   int64_t gta4_a_loops = 0, gta4_a_cbs = 0;
   const auto gta4_a_now = [] {

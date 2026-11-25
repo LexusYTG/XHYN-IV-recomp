@@ -58,7 +58,7 @@ android {
         // Shown as e.g. 0.5.9-mali-alpha-1.5. The workflow reads both the
         // base version and versionSuffix to name the APK.
         val versionSuffix = "-alpha-1.9"
-        versionName   = "Experimental 2"
+        versionName   = "Experimental 3"
 
         // Read by DriverBridge.defaultMode(): the driver used when driver.txt
         // does not exist yet.

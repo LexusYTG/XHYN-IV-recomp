@@ -312,6 +312,8 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     }
     ++gta4_s_calls;
     gta4_s_depth += int64_t(driver->frames_queued_.size());
+    if (driver->stretch_ratio_ < 1.0f) driver->stretch_ratio_ = 1.0f;
+    if (driver->rebuffering_ && !driver->frames_queued_.empty()) driver->rebuffering_ = false;
     if (driver->stretch_ratio_ < gta4_s_ratio_min) gta4_s_ratio_min = driver->stretch_ratio_;
     if (driver->rebuffering_) {
       ++gta4_s_silence;
@@ -329,6 +331,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       auto buffer = driver->frames_queued_.front();
       driver->frames_queued_.pop();
       ++gta4_s_frames;
+      if (driver->stretch_ratio_ < 1.0f) driver->stretch_ratio_ = 1.0f;
       if (REXCVAR_GET(audio_mute)) {
         std::memset(data, 0, len);
       } else {

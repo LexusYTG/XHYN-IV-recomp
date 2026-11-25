@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/audio/sdl/aaudio_driver.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
@@ -32,7 +33,7 @@ void SDLAudioSystem::Initialize() {
 X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
                                       rex::thread::Semaphore* semaphore, AudioDriver** out_driver) {
   assert_not_null(out_driver);
-  auto driver = new SDLAudioDriver(memory_, semaphore);
+  auto driver = new AAudioDriver(memory_, semaphore);
   if (!driver->Initialize()) {
     driver->Shutdown();
     delete driver;
@@ -45,7 +46,7 @@ X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
 
 void SDLAudioSystem::DestroyDriver(AudioDriver* driver) {
   assert_not_null(driver);
-  auto sdldriver = dynamic_cast<SDLAudioDriver*>(driver);
+  auto sdldriver = dynamic_cast<AAudioDriver*>(driver);
   assert_not_null(sdldriver);
   sdldriver->Shutdown();
   delete sdldriver;
