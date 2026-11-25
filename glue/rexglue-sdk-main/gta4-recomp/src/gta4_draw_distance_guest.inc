@@ -1026,7 +1026,7 @@ loc_821D6910:
 	goto loc_821D67B4;
 }
 
-extern "C" void sub_821D8CD8(PPCContext& ctx, uint8_t* base) {
+static void Gta4Classify821D8CD8(PPCContext& ctx, uint8_t* base) {
   if (!IsNativeMode()) {
     __imp__sub_821D8CD8(ctx, base);
     return;
@@ -1422,4 +1422,9 @@ loc_821D8F50:
 	// b 0x829ff814
 	__restgprlr_27(ctx, base);
 	return;
+}
+
+extern "C" void sub_821D8CD8(PPCContext& ctx, uint8_t* base) {
+  Gta4Classify821D8CD8(ctx, base);
+  if (IsNativeMode() && ctx.r3.u32 == 3) ctx.r3.u32 = 0;
 }

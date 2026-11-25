@@ -241,8 +241,8 @@ constexpr uint32_t kShadowQualityCascadeOffset = 0x08;
 // physical heap without introducing an EDRAM buffer or tile emulation.
 constexpr uint32_t kNativeBackingWidth = 1;
 constexpr uint32_t kNativeBackingHeight = 1;
-constexpr uint32_t kOriginalRenderTargetWidth = 1280;
-constexpr uint32_t kOriginalRenderTargetHeight = 720;
+constexpr uint32_t kOriginalRenderTargetWidth = 640;
+constexpr uint32_t kOriginalRenderTargetHeight = 360;
 constexpr uint32_t kResourcePackedDimensionsOffset = 0x24;
 constexpr uint32_t kResourceNonDimensionMask = 0x00000007;
 constexpr uint32_t kTextureDimensionFieldMask = 0x00001FFF;
@@ -2711,7 +2711,7 @@ void ApplyShadowDistanceScale(uint8_t* base) {
 
   std::lock_guard lock(shadow_range_mutex);
   // Fewer directional shadow cascades for CPU-bound hosts (0 keeps stock).
-  if (const uint32_t cascades = 1; cascades != 0) {
+  if (const uint32_t cascades = 0; true) {
     for (uint32_t context = 0; context < kNativeShadowContextCount; ++context) {
       const uint32_t address =
           kShadowQualityTable + context * kShadowQualityContextStride + kShadowQualityCascadeOffset;
@@ -7674,6 +7674,3 @@ extern "C" void sub_82A467D8(PPCContext& ctx, uint8_t* base) {
 #include "gta4_fade_trace_hooks.inc"
 #include "gta4_phone_trace_hooks.inc"
 
-extern "C" void sub_82275B80(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }
-extern "C" void sub_82275CF8(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }
-extern "C" void sub_82275E38(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; }

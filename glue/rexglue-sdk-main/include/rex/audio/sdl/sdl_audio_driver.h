@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <queue>
 #include <stack>
@@ -31,6 +32,7 @@ class SDLAudioDriver : public AudioDriver {
   void SubmitFrame(uint32_t frame_ptr) override;
   void Pause() override;
   void Resume() override;
+  uint32_t RecommendedInitialCredits(uint32_t configured_maximum) const override;
   void Flush() override;
   void Shutdown();
 
@@ -45,6 +47,10 @@ class SDLAudioDriver : public AudioDriver {
   bool sdl_initialized_ = false;
   bool silent_fallback_ = false;
   uint8_t sdl_device_channels_ = 0;
+  bool rebuffering_ = true;
+  float stretch_ratio_ = 1.0f;
+  float applied_ratio_ = 1.0f;
+  mutable std::atomic<uint32_t> credit_limit_{32};
 
   static const uint32_t frame_frequency_ = 48000;
   static const uint32_t frame_channels_ = 6;

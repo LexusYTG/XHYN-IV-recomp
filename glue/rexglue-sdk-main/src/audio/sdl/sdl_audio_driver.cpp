@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -197,6 +198,11 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   }
 }
 
+uint32_t SDLAudioDriver::RecommendedInitialCredits(uint32_t configured_maximum) const {
+  credit_limit_.store(std::max(configured_maximum, 1u), std::memory_order_relaxed);
+  return configured_maximum;
+}
+
 void SDLAudioDriver::Pause() {
   if (!sdl_stream_) {
     FlushQueuedFrames();
@@ -282,7 +288,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
-    if (driver->frames_queued_.empty()) {
+    const size_t rebuffer_threshold = std::max<uint32_t>(
+        1u, std::min<uint32_t>(3u, driver->credit_limit_.load(std::memory_order_relaxed) / 2u));
+    if (!driver->rebuffering_ && driver->frames_queued_.empty()) {
+      driver->rebuffering_ = true;
+    } else if (driver->rebuffering_ && driver->frames_queued_.size() >= rebuffer_threshold) {
+      driver->rebuffering_ = false;
+    }
+    {
+      const float target_depth = 3.0f;
+      const float depth = static_cast<float>(driver->frames_queued_.size());
+      const float wanted = depth >= target_depth
+                               ? std::min(1.12f, 1.0f + 0.04f * (depth - target_depth))
+                               : 0.5f + 0.5f * (depth / target_depth);
+      driver->stretch_ratio_ += (wanted - driver->stretch_ratio_) * 0.1f;
+      if (std::fabs(driver->stretch_ratio_ - driver->applied_ratio_) > 0.002f &&
+          SDL_SetAudioStreamFrequencyRatio(stream, driver->stretch_ratio_)) {
+        driver->applied_ratio_ = driver->stretch_ratio_;
+      }
+    }
+    if (driver->rebuffering_) {
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
         sdl_callback_count++;

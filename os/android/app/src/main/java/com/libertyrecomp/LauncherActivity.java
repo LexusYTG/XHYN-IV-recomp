@@ -35,6 +35,8 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.TextView;
 
 import org.json.JSONObject;
@@ -307,7 +309,7 @@ public class LauncherActivity extends Activity {
         LinearLayout right = new LinearLayout(this);
         right.setOrientation(LinearLayout.VERTICAL);
         right.setPadding(dp(16), dp(12), dp(16), dp(12));
-        right.setBackground(rounded(color(R.color.picker_card), dp(10)));
+        right.setBackground(rounded(color(R.color.picker_card), dp(16)));
 
         TextView title = text("Vulkan driver", 18, R.color.picker_text);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -339,20 +341,30 @@ public class LauncherActivity extends Activity {
                 + "falls back to the device's own driver.", 12, R.color.picker_muted),
                 matchWrap(dp(10)));
 
-        LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        column.addView(buildInstallCard());
-        column.addView(right, matchWrap(dp(14)));
-        column.addView(buildGraphicsCard(), matchWrap(dp(14)));
-        column.addView(buildOverlayCard(), matchWrap(dp(14)));
-        column.addView(buildSaveRow(), matchWrap(dp(14)));
+        LinearLayout home = new LinearLayout(this);
+        home.setOrientation(LinearLayout.VERTICAL);
+        home.addView(buildInstallCard());
+        Button openSettings = button("Settings", true);
+        openSettings.setOnClickListener(v -> showSettings(true));
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        settingsParams.topMargin = dp(14);
+        home.addView(openSettings, settingsParams);
         ScrollView rightScroll = new ScrollView(this);
         mRightScroll = rightScroll;
-        rightScroll.addView(column);
+        rightScroll.addView(home);
+        mHomePage = rightScroll;
+        mSettingsPage = buildSettingsPage(right);
+        mSettingsPage.setVisibility(View.GONE);
+        FrameLayout pages = new FrameLayout(this);
+        pages.addView(mHomePage, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        pages.addView(mSettingsPage, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         rightParams.leftMargin = dp(20);
-        root.addView(rightScroll, rightParams);
+        root.addView(pages, rightParams);
         return root;
     }
 
@@ -591,16 +603,152 @@ public class LauncherActivity extends Activity {
     private final int[] mGraphicsPositions = new int[GRAPHICS_SETTINGS.length];
     private boolean mGraphicsLoading;
 
-    private View buildGraphicsCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(12), dp(16), dp(12));
-        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
-        TextView title = text("Graphics & controls", 18, R.color.picker_text);
+    private static final String[] SETTINGS_TABS = {
+            "Video", "Graphics", "Performance", "Controls", "Overlay", "Driver"};
+    private static final int TAB_OVERLAY = 4;
+    private static final int TAB_DRIVER = 5;
+    private View mHomePage;
+    private View mSettingsPage;
+    private final Button[] mTabButtons = new Button[SETTINGS_TABS.length];
+    private final View[] mTabPages = new View[SETTINGS_TABS.length];
+
+    private static int tabFor(GraphicsSetting setting) {
+        String cvar = setting.cvars[0];
+        if (cvar.startsWith("gta4_touch_")) return 3;
+        switch (cvar) {
+            case "gta4_output_height_cap":
+            case "gta4_native_upscaler":
+            case "gta4_fsr1_quality":
+            case "gta4_native_anti_aliasing":
+            case "gta4_native_msaa":
+            case "gta4_frame_limit":
+            case "gta4_motion_blur":
+                return 0;
+            case "gta4_native_lazy_resolves":
+            case "gta4_native_vertex_cache_order":
+            case "gta4_extra_frames_in_flight":
+            case "android_performance_hint_target_ms":
+                return 2;
+            default:
+                return 1;
+        }
+    }
+
+    private boolean settingsVisible() {
+        return mSettingsPage != null && mSettingsPage.getVisibility() == View.VISIBLE;
+    }
+
+    private void showSettings(boolean show) {
+        mHomePage.setVisibility(show ? View.GONE : View.VISIBLE);
+        mSettingsPage.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (settingsVisible()) {
+            showSettings(false);
+        } else {
+            super.onBackPressed();
+        }
+    }
+
+    private void selectTab(int index) {
+        for (int i = 0; i < SETTINGS_TABS.length; ++i) {
+            boolean selected = i == index;
+            mTabPages[i].setVisibility(selected ? View.VISIBLE : View.GONE);
+            mTabButtons[i].setTextColor(selected ? 0xFF1A1300 : TEXT_MUTED);
+            mTabButtons[i].setBackground(focusBackground(selected ? ACCENT : Color.TRANSPARENT));
+        }
+    }
+
+    private LinearLayout settingsTabPage(String title, String subtitle) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(20), dp(16), dp(20), dp(10));
+        page.setBackground(rounded(color(R.color.picker_card), dp(16)));
+        TextView heading = text(title, 20, R.color.picker_text);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(heading);
+        page.addView(text(subtitle, 12, R.color.picker_muted), matchWrap(dp(2)));
+        return page;
+    }
+
+    private View buildSettingsPage(View driverCard) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        Button back = button("Back", false);
+        back.setOnClickListener(v -> showSettings(false));
+        header.addView(back, new LinearLayout.LayoutParams(dp(96), dp(44)));
+        TextView title = text("Settings", 26, R.color.picker_text);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        card.addView(title);
-        card.addView(text("\"Default\" keeps the value from args.txt. Press Save changes, then "
-                + "Play.", 12, R.color.picker_muted), matchWrap(dp(2)));
+        title.setPadding(dp(14), 0, 0, 0);
+        header.addView(title);
+        page.addView(header);
+
+        LinearLayout tabBar = new LinearLayout(this);
+        tabBar.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < SETTINGS_TABS.length; ++i) {
+            Button tab = button(SETTINGS_TABS[i], false);
+            tab.setPadding(dp(16), 0, dp(16), 0);
+            final int index = i;
+            tab.setOnClickListener(v -> selectTab(index));
+            mTabButtons[i] = tab;
+            LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(44));
+            if (i > 0) tabParams.leftMargin = dp(8);
+            tabBar.addView(tab, tabParams);
+        }
+        HorizontalScrollView tabScroll = new HorizontalScrollView(this);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.addView(tabBar);
+        page.addView(tabScroll, matchWrap(dp(10)));
+
+        LinearLayout presets = new LinearLayout(this);
+        presets.setOrientation(LinearLayout.HORIZONTAL);
+        Button preset = button("Performance", false);
+        preset.setOnClickListener(v -> {
+            applyPerformancePreset(false);
+            markSettingsChanged();
+            toast("Performance preset applied - press Save changes");
+        });
+        presets.addView(preset, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        Button maxPreset = button("Maximum (360p)", false);
+        maxPreset.setOnClickListener(v -> {
+            applyPerformancePreset(true);
+            markSettingsChanged();
+            toast("Maximum performance preset applied - press Save changes");
+        });
+        LinearLayout.LayoutParams maxParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        maxParams.leftMargin = dp(8);
+        presets.addView(maxPreset, maxParams);
+        Button reset = button("Reset", false);
+        reset.setOnClickListener(v -> {
+            mGraphicsLoading = true;
+            for (Spinner spinner : mGraphicsSpinners) spinner.setSelection(0, false);
+            mGraphicsLoading = false;
+            markSettingsChanged();
+            toast("Settings set to Default - press Save changes");
+        });
+        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        resetParams.leftMargin = dp(8);
+        presets.addView(reset, resetParams);
+        page.addView(presets, matchWrap(dp(10)));
+
+        page.addView(text("\"Default\" keeps the value from args.txt. Press Save changes, then Play.",
+                12, R.color.picker_muted), matchWrap(dp(6)));
+
+        String[] pageTitles = {"Video", "Graphics", "Performance", "Controls"};
+        String[] pageNotes = {"Resolution, upscaling, anti-aliasing and frame rate",
+                "Distance, population, shadows and reflections",
+                "CPU and GPU trade-offs for slower phones",
+                "Touch layout, size and opacity"};
+        for (int i = 0; i < 4; ++i) mTabPages[i] = settingsTabPage(pageTitles[i], pageNotes[i]);
+        mTabPages[TAB_OVERLAY] = buildOverlayCard();
+        mTabPages[TAB_DRIVER] = driverCard;
 
         java.util.Map<String, String> saved = readGraphicsSettings();
         mGraphicsLoading = true;
@@ -612,7 +760,9 @@ public class LauncherActivity extends Activity {
 
             LinearLayout labels = new LinearLayout(this);
             labels.setOrientation(LinearLayout.VERTICAL);
-            labels.addView(text(setting.label, 15, R.color.picker_text));
+            TextView labelText = text(setting.label, 15, R.color.picker_text);
+            labelText.setTypeface(Typeface.DEFAULT_BOLD);
+            labels.addView(labelText);
             labels.addView(text(setting.note, 11, R.color.picker_muted));
             row.addView(labels, new LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -620,7 +770,7 @@ public class LauncherActivity extends Activity {
             Spinner spinner = new Spinner(this, Spinner.MODE_DROPDOWN);
             spinner.setAdapter(graphicsAdapter(setting.choices));
             spinner.setPopupBackgroundDrawable(rounded(color(R.color.picker_card), dp(8)));
-            spinner.setBackground(focusBackground(0xFF30363D));
+            spinner.setBackground(focusBackground(SURF2));
             spinner.setFocusable(true);
             String current = saved.get(setting.cvars[0]);
             int selection = 0;
@@ -645,50 +795,33 @@ public class LauncherActivity extends Activity {
             });
             mGraphicsSpinners[i] = spinner;
             LinearLayout.LayoutParams spinnerParams =
-                    new LinearLayout.LayoutParams(dp(170), dp(44));
-            spinnerParams.leftMargin = dp(10);
+                    new LinearLayout.LayoutParams(dp(164), dp(44));
+            spinnerParams.leftMargin = dp(12);
             row.addView(spinner, spinnerParams);
-            card.addView(row, matchWrap(dp(10)));
+            LinearLayout target = (LinearLayout) mTabPages[tabFor(setting)];
+            View divider = new View(this);
+            divider.setBackgroundColor(LINE);
+            target.addView(divider, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            row.setPadding(0, dp(12), 0, dp(12));
+            target.addView(row, matchWrap(0));
         }
         // Listeners fire once for the initial selection after layout; only
         // react to changes the user makes afterwards.
-        card.post(() -> mGraphicsLoading = false);
+        page.post(() -> mGraphicsLoading = false);
 
-        Button preset = button("Performance preset", false);
-        preset.setOnClickListener(v -> {
-            applyPerformancePreset(false);
-            markSettingsChanged();
-            toast("Performance preset applied - press Save changes");
-        });
-        LinearLayout.LayoutParams presetParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
-        presetParams.topMargin = dp(12);
-        card.addView(preset, presetParams);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        for (View tabPage : mTabPages) body.addView(tabPage, matchWrap(0));
+        ScrollView content = new ScrollView(this);
+        content.addView(body);
+        page.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        ((LinearLayout.LayoutParams) content.getLayoutParams()).topMargin = dp(10);
 
-        Button maxPreset = button("Maximum performance preset (360p)", false);
-        maxPreset.setOnClickListener(v -> {
-            applyPerformancePreset(true);
-            markSettingsChanged();
-            toast("Maximum performance preset applied - press Save changes");
-        });
-        LinearLayout.LayoutParams maxPresetParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
-        maxPresetParams.topMargin = dp(12);
-        card.addView(maxPreset, maxPresetParams);
-
-        Button reset = button("Reset to default", false);
-        reset.setOnClickListener(v -> {
-            mGraphicsLoading = true;
-            for (Spinner spinner : mGraphicsSpinners) spinner.setSelection(0, false);
-            mGraphicsLoading = false;
-            markSettingsChanged();
-            toast("Graphics settings set to Default - press Save changes");
-        });
-        LinearLayout.LayoutParams resetParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
-        resetParams.topMargin = dp(12);
-        card.addView(reset, resetParams);
-        return card;
+        page.addView(buildSaveRow(), matchWrap(dp(10)));
+        selectTab(0);
+        return page;
     }
 
     // One-click starting point for low-end GPUs (Mali-G52 class): cut the
@@ -703,8 +836,9 @@ public class LauncherActivity extends Activity {
         selectGraphicsValue("gta4_frame_limit", "30");
         selectGraphicsValue("gta4_draw_distance_scale", "0.6");
         selectGraphicsValue("gta4_traffic_density_scale", "0.2");
-        selectGraphicsValue("gta4_native_shadow_interval", maximum ? "3" : "2");
-        selectGraphicsValue("gta4_native_water_reflection_interval", maximum ? "3" : "2");
+        selectGraphicsValue("gta4_native_shadow_interval", "0");
+        selectGraphicsValue("gta4_native_water_reflection_interval", "0");
+        selectGraphicsValue("gta4_native_environment_reflection_interval", "0");
         selectGraphicsValue("gta4_native_lazy_resolves", "true");
         selectGraphicsValue("gta4_native_vertex_cache_order", "false");
         mGraphicsLoading = false;
@@ -804,7 +938,7 @@ public class LauncherActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
-        row.setBackground(rounded(color(R.color.picker_card), dp(10)));
+        row.setBackground(rounded(color(R.color.picker_card), dp(16)));
         Button save = button("Save changes", true);
         save.setOnClickListener(v -> saveSettings(true));
         row.addView(save, new LinearLayout.LayoutParams(
@@ -857,7 +991,7 @@ public class LauncherActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(12), dp(16), dp(12));
-        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
+        card.setBackground(rounded(color(R.color.picker_card), dp(16)));
         TextView title = text("Performance overlay", 18, R.color.picker_text);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         card.addView(title);
@@ -1009,7 +1143,7 @@ public class LauncherActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(12), dp(16), dp(12));
-        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
+        card.setBackground(rounded(color(R.color.picker_card), dp(16)));
 
         mInstallTitle = text("Game", 18, R.color.picker_text);
         mInstallTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1569,7 +1703,7 @@ public class LauncherActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(18), dp(14), dp(18), dp(14));
-        card.setBackground(rounded(color(R.color.picker_card), dp(10)));
+        card.setBackground(rounded(color(R.color.picker_card), dp(16)));
 
         TextView title = text("Performance test settings", 18, R.color.picker_text);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1775,7 +1909,9 @@ public class LauncherActivity extends Activity {
                     return true;
                 }
                 case KeyEvent.KEYCODE_BUTTON_B:
-                    if (Installer.running()) {
+                    if (settingsVisible()) {
+                        showSettings(false);
+                    } else if (Installer.running()) {
                         toast("The game is being installed.");
                     } else {
                         finish();
@@ -1832,19 +1968,19 @@ public class LauncherActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextColor(primary ? Color.BLACK : color(R.color.picker_text));
+        button.setTextColor(primary ? 0xFF1A1300 : TEXT_MAIN);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setBackground(focusBackground(primary ? 0xFFE6E6E6 : 0xFF30363D));
+        button.setBackground(focusBackground(primary ? ACCENT : SURF2));
         button.setFocusable(true);
         return button;
     }
 
     /** A rounded fill with a bright outline while focused, for gamepad navigation. */
     private StateListDrawable focusBackground(int fill) {
-        GradientDrawable normal = rounded(fill, dp(8));
-        GradientDrawable focused = rounded(fill, dp(8));
-        focused.setStroke(dp(3), 0xFF3FA9F5);
-        GradientDrawable pressed = rounded(fill == Color.TRANSPARENT ? 0x33FFFFFF : fill, dp(8));
+        GradientDrawable normal = rounded(fill, dp(12));
+        GradientDrawable focused = rounded(fill, dp(12));
+        focused.setStroke(dp(3), ACCENT);
+        GradientDrawable pressed = rounded(fill == Color.TRANSPARENT ? 0x33FFFFFF : fill, dp(12));
         pressed.setStroke(dp(3), 0xFFFFFFFF);
         StateListDrawable states = new StateListDrawable();
         states.addState(new int[] {android.R.attr.state_pressed}, pressed);
@@ -1867,7 +2003,19 @@ public class LauncherActivity extends Activity {
         return params;
     }
 
+    private static final int BG = 0xFF0D1015;
+    private static final int SURFACE = 0xFF171B22;
+    private static final int SURF2 = 0xFF232932;
+    private static final int ACCENT = 0xFFF2A900;
+    private static final int LINE = 0xFF2A313B;
+    private static final int TEXT_MAIN = 0xFFF1F3F6;
+    private static final int TEXT_MUTED = 0xFF8D96A3;
+
     private int color(int res) {
+        if (res == R.color.picker_bg) return BG;
+        if (res == R.color.picker_card) return SURFACE;
+        if (res == R.color.picker_text) return TEXT_MAIN;
+        if (res == R.color.picker_muted) return TEXT_MUTED;
         return getResources().getColor(res, getTheme());
     }
 

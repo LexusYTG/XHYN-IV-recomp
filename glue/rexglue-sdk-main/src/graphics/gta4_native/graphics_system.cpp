@@ -181,7 +181,7 @@ REXCVAR_DEFINE_BOOL(gta4_native_pipeline_serialize, false, "GTA IV/Diagnostics",
 REXCVAR_DEFINE_UINT32(gta4_native_max_queued_frames, 2, "GTA IV/Graphics/Native Renderer",
                       "Title frames the producer may run ahead of the recorder")
     .range(1, 4);
-REXCVAR_DEFINE_UINT32(gta4_texture_skip_mips, 1, "GTA IV/Graphics/Native Renderer",
+REXCVAR_DEFINE_UINT32(gta4_texture_skip_mips, 0, "GTA IV/Graphics/Native Renderer",
                       "Mip levels dropped from the top of CPU-uploaded 2D color textures")
     .range(0, 4);
 REXCVAR_DEFINE_UINT32(gta4_native_frame_complete_signal, 0, "GTA IV/Graphics/Native Renderer",
@@ -601,7 +601,7 @@ REXCVAR_DEFINE_UINT32(
     "Frames between native texture memory-budget pressure checks (0 checks every frame)")
     .range(0, 3600);
 REXCVAR_DEFINE_UINT32(
-    gta4_native_texture_memory_limit_mb, 256, "GTA IV/Graphics/Native Renderer",
+    gta4_native_texture_memory_limit_mb, 512, "GTA IV/Graphics/Native Renderer",
     "Optional native texture heap budget cap in MiB (0 uses the Vulkan driver budget)");
 
 namespace rex::graphics::gta4_native {
@@ -7155,6 +7155,261 @@ void Gta4NativeGraphicsSystem::FinishPresent(NativeCommand& command,
   SignalGuestFrameComplete(present.device, present.submitted_frame);
   ClearNativeFrameCommands();
   UpdateDynamicDrawDistance();
+  FrameGenPresentPending();
+}
+
+static bool FrameGenEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("GTA4_FRAMEGEN");
+    return !v || v[0] != '0';
+  }();
+  return enabled;
+}
+
+static uint64_t FrameGenNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+bool Gta4NativeGraphicsSystem::FrameGenEnsureBuffers(uint32_t width, uint32_t height) {
+  if (!width || !height) return false;
+  if (framegen_.alloc_w == width && framegen_.alloc_h == height && framegen_.buffers[0].buffer)
+    return true;
+  {
+    std::lock_guard lock(framegen_.mutex);
+    framegen_.job.reset();
+  }
+  const VkDeviceSize bytes = VkDeviceSize(width) * height * 8;  // R16G16B16A16_SFLOAT
+  for (auto& b : framegen_.buffers) {
+    if (b.buffer) DestroyNativeUploadBuffer(b);
+  }
+  for (auto& b : framegen_.buffers) {
+    if (!CreateNativeUploadBuffer(bytes, b, true)) {
+      for (auto& d : framegen_.buffers) {
+        if (d.buffer) DestroyNativeUploadBuffer(d);
+      }
+      framegen_.alloc_w = framegen_.alloc_h = 0;
+      return false;
+    }
+  }
+  framegen_.alloc_w = width;
+  framegen_.alloc_h = height;
+  framegen_.hist_count = 0;
+  framegen_.pending = false;
+  return true;
+}
+
+bool Gta4NativeGraphicsSystem::FrameGenUpload(uint32_t buffer_index, const FrameGenJob& job) {
+  auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      vulkan_provider ? vulkan_provider->vulkan_device() : nullptr;
+  if (!vulkan_device || !presenter_) return false;
+  const auto& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  if (!framegen_.tracker)
+    framegen_.tracker = std::make_shared<ui::vulkan::VulkanSubmissionTracker>(vulkan_device);
+  if (framegen_.upload_submission)
+    framegen_.tracker->AwaitSubmissionCompletion(framegen_.upload_submission);
+  if (!framegen_.pool) {
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = vulkan_device->queue_family_native_offscreen();
+    if (dfn.vkCreateCommandPool(device, &pool_info, nullptr, &framegen_.pool) != VK_SUCCESS)
+      return false;
+    VkCommandBufferAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc.commandPool = framegen_.pool;
+    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc.commandBufferCount = 1;
+    if (dfn.vkAllocateCommandBuffers(device, &alloc, &framegen_.cb) != VK_SUCCESS) {
+      dfn.vkDestroyCommandPool(device, framegen_.pool, nullptr);
+      framegen_.pool = VK_NULL_HANDLE;
+      return false;
+    }
+  } else if (dfn.vkResetCommandPool(device, framegen_.pool, 0) != VK_SUCCESS) {
+    return false;
+  }
+  const uint32_t w = job.width, h = job.height;
+  const VkBuffer source = framegen_.buffers[buffer_index].buffer;
+  const uint32_t frame = job.frame;
+  std::lock_guard<std::mutex> refresh_lock(framegen_refresh_mutex_);
+  return presenter_->RefreshGuestOutput(
+      w, h, job.display_width, job.display_height,
+      [this, vulkan_device, w, h, source](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+        auto& vc =
+            static_cast<ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext&>(context);
+        const auto& dfn = vulkan_device->functions();
+        const VkCommandBuffer cb = framegen_.cb;
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (dfn.vkBeginCommandBuffer(cb, &begin) != VK_SUCCESS) return false;
+        const bool ever = vc.image_ever_written_previously();
+        VkImageMemoryBarrier to_dst{};
+        to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        to_dst.srcAccessMask = ever ? ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask : 0;
+        to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        to_dst.oldLayout =
+            ever ? ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout : VK_IMAGE_LAYOUT_UNDEFINED;
+        to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_dst.image = vc.image();
+        to_dst.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
+        dfn.vkCmdPipelineBarrier(
+            cb, ever ? ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask
+                     : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent = {w, h, 1};
+        dfn.vkCmdCopyBufferToImage(cb, source, vc.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                   &copy);
+        VkImageMemoryBarrier release = to_dst;
+        release.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        release.dstAccessMask = ui::vulkan::VulkanPresenter::kGuestOutputInternalAccessMask;
+        release.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        release.newLayout = ui::vulkan::VulkanPresenter::kGuestOutputInternalLayout;
+        dfn.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 ui::vulkan::VulkanPresenter::kGuestOutputInternalStageMask, 0, 0,
+                                 nullptr, 0, nullptr, 1, &release);
+        if (dfn.vkEndCommandBuffer(cb) != VK_SUCCESS) return false;
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cb;
+        ui::vulkan::ImageAccessSubmit access_submit;
+        if (!access_submit.Attach(submit, vc.image_access())) return false;
+        const uint64_t submission = framegen_.tracker->GetCurrentSubmission();
+        ui::vulkan::VulkanSubmissionTracker::FenceAcquisition fence(
+            framegen_.tracker->AcquireFenceToAdvanceSubmission());
+        if (!fence.fence()) {
+          fence.SubmissionFailedOrDropped();
+          return false;
+        }
+        VkResult result;
+        {
+          auto queue = vulkan_device->AcquireQueue(vulkan_device->queue_family_native_offscreen(), 0);
+          result = dfn.vkQueueSubmit(queue.queue(), 1, &submit, fence.fence());
+        }
+        if (result != VK_SUCCESS) {
+          fence.SubmissionFailedOrDropped();
+          return false;
+        }
+        vc.MarkImageAccessSubmitted();
+        framegen_.upload_submission = submission;
+        context.SetCompletion(
+            std::make_shared<NativeSubmissionCompletion>(framegen_.tracker, submission));
+        context.SetIs8bpc(false);
+        return true;
+      },
+      ui::GuestOutputProvenance{
+          .frame_rate_limit = 0,
+          .submitted_frame = frame,
+      });
+}
+
+void Gta4NativeGraphicsSystem::FrameGenThreadMain() {
+  uint64_t jobs = 0, window_start_ns = FrameGenNowNs();
+  double blend_ms_sum = 0.0;
+  while (true) {
+    FrameGenJob job;
+    {
+      std::unique_lock lock(framegen_.mutex);
+      framegen_.cv.wait(lock, [this] { return framegen_.stop || framegen_.job.has_value(); });
+      if (framegen_.stop) return;
+      job = *framegen_.job;
+      framegen_.job.reset();
+    }
+#if defined(__aarch64__)
+    if (job.a >= 0) {
+      const uint64_t t0 = FrameGenNowNs();
+      const __fp16* a = reinterpret_cast<const __fp16*>(framegen_.buffers[job.a].mapping);
+      const __fp16* b = reinterpret_cast<const __fp16*>(framegen_.buffers[job.b].mapping);
+      __fp16* m = reinterpret_cast<__fp16*>(framegen_.buffers[FrameGenState::kSlots].mapping);
+      const size_t n = size_t(job.width) * job.height * 4;
+      for (size_t i = 0; i < n; ++i) m[i] = __fp16((float(a[i]) + float(b[i])) * 0.5f);
+      blend_ms_sum += double(FrameGenNowNs() - t0) / 1.0e6;
+      if (FrameGenUpload(FrameGenState::kSlots, job)) {
+        const uint64_t half = uint64_t(job.interval_ns * 0.5);
+        const uint64_t elapsed = FrameGenNowNs() - job.post_ns;
+        if (elapsed < half) std::this_thread::sleep_for(std::chrono::nanoseconds(half - elapsed));
+      }
+    }
+#endif
+    FrameGenUpload(uint32_t(job.b), job);
+    if (++jobs % 120 == 0) {
+      const uint64_t now = FrameGenNowNs();
+      REXLOG_INFO("gta4-framegen: jobs={} game-fps={:.1f} interval-ms={:.1f} blend-ms={:.2f}",
+                  jobs, 120.0e9 / double(now - window_start_ns), job.interval_ns / 1.0e6,
+                  blend_ms_sum / 120.0);
+      window_start_ns = now;
+      blend_ms_sum = 0.0;
+    }
+  }
+}
+
+void Gta4NativeGraphicsSystem::FrameGenShutdown() {
+  {
+    std::lock_guard lock(framegen_.mutex);
+    framegen_.stop = true;
+  }
+  framegen_.cv.notify_all();
+  if (framegen_.thread.joinable()) framegen_.thread.join();
+  auto* vulkan_provider = static_cast<ui::vulkan::VulkanProvider*>(provider_.get());
+  const ui::vulkan::VulkanDevice* vulkan_device =
+      vulkan_provider ? vulkan_provider->vulkan_device() : nullptr;
+  if (vulkan_device && framegen_.pool) {
+    vulkan_device->functions().vkDestroyCommandPool(vulkan_device->device(), framegen_.pool, nullptr);
+  }
+  framegen_.pool = VK_NULL_HANDLE;
+  framegen_.cb = VK_NULL_HANDLE;
+  for (auto& b : framegen_.buffers) {
+    if (b.buffer) DestroyNativeUploadBuffer(b);
+  }
+  framegen_.alloc_w = framegen_.alloc_h = 0;
+  framegen_.tracker.reset();
+  framegen_.upload_submission = 0;
+  framegen_.job.reset();
+  framegen_.stop = false;
+}
+
+void Gta4NativeGraphicsSystem::FrameGenPresentPending() {
+  if (!framegen_.pending) return;
+  framegen_.pending = false;
+  const uint64_t now = FrameGenNowNs();
+  if (framegen_.last_record_ns) {
+    framegen_.interval_ns =
+        framegen_.interval_ns * 0.8 +
+        std::clamp(double(now - framegen_.last_record_ns), 8.0e6, 100.0e6) * 0.2;
+  }
+  framegen_.last_record_ns = now;
+  framegen_.hist[2] = framegen_.hist[1];
+  framegen_.hist[1] = framegen_.hist[0];
+  framegen_.hist[0] = framegen_.write_slot;
+  if (framegen_.hist_count < 3) ++framegen_.hist_count;
+  if (framegen_.hist_count < 2) return;
+  // Frame N-1 was submitted a whole game frame ago; this wait is normally instant.
+  submission_tracker_->AwaitSubmissionCompletion(framegen_.slot_submission[framegen_.hist[1]]);
+  FrameGenJob job;
+  job.a = framegen_.hist_count >= 3 ? int(framegen_.hist[2]) : -1;
+  job.b = int(framegen_.hist[1]);
+  job.width = framegen_.width;
+  job.height = framegen_.height;
+  job.display_width = framegen_.display_width;
+  job.display_height = framegen_.display_height;
+  job.frame = framegen_.submitted_frame;
+  job.interval_ns = framegen_.interval_ns;
+  job.post_ns = now;
+  if (!framegen_.thread.joinable())
+    framegen_.thread = std::thread([this] { FrameGenThreadMain(); });
+  {
+    std::lock_guard lock(framegen_.mutex);
+    framegen_.job = job;
+  }
+  framegen_.cv.notify_one();
 }
 
 void Gta4NativeGraphicsSystem::UpdateDynamicDrawDistance() {
@@ -37065,6 +37320,7 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
         bool(present_source), present_source ? present_source->generation : 0);
   }
 
+  std::unique_lock<std::mutex> framegen_refresh_lock(framegen_refresh_mutex_);
   const bool refresh_result = presenter_->RefreshGuestOutput(
       width, height, display_width, display_height,
       [this, vulkan_device, width, height, submitted_frame, present_source, environmental_data,
@@ -37457,6 +37713,49 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
             native_profile_frame_started ? rex::chrono::Clock::QueryHostTickCount() : 0;
         SwitchNativeGpuProfileRange(command_buffer_, performance::GpuRange::kFrameRelease);
         AcquireNativePresenterImage(command_buffer_);
+        const bool framegen_capture = present.device != 0 && FrameGenEnabled() && presenter_written &&
+                                      FrameGenEnsureBuffers(width, height);
+        if (framegen_capture) {
+          framegen_.write_slot = (framegen_.write_slot + 1) % FrameGenState::kSlots;
+          const bool tw = presenter_transfer_written;
+          const VkAccessFlags fg_access =
+              tw ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+          const VkImageLayout fg_layout =
+              tw ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+          const VkPipelineStageFlags fg_stage =
+              tw ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+          VkImageMemoryBarrier to_src{};
+          to_src.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+          to_src.srcAccessMask = fg_access;
+          to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          to_src.oldLayout = fg_layout;
+          to_src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+          to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+          to_src.image = vulkan_context.image();
+          to_src.subresourceRange = ui::vulkan::util::InitializeSubresourceRange();
+          dfn.vkCmdPipelineBarrier(command_buffer_, fg_stage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                   nullptr, 0, nullptr, 1, &to_src);
+          VkBufferImageCopy fg_copy{};
+          fg_copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+          fg_copy.imageSubresource.layerCount = 1;
+          fg_copy.imageExtent = {width, height, 1};
+          dfn.vkCmdCopyImageToBuffer(command_buffer_, vulkan_context.image(),
+                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     framegen_.buffers[framegen_.write_slot].buffer, 1, &fg_copy);
+          VkMemoryBarrier to_host{};
+          to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+          to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+          to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+          VkImageMemoryBarrier to_back = to_src;
+          to_back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+          to_back.dstAccessMask = fg_access;
+          to_back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+          to_back.newLayout = fg_layout;
+          dfn.vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   fg_stage | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0,
+                                   nullptr, 1, &to_back);
+        }
         VkImageMemoryBarrier release_barrier{};
         release_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         release_barrier.srcAccessMask =
@@ -37716,6 +38015,10 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
           native_profile_submission_committed = true;
         }
         UpdateNativeMemoryProfile(submitted_frame);
+        if (framegen_capture) {
+          framegen_.readback_submission = submission;
+          framegen_.deferred = true;
+        }
         context.SetIs8bpc(false);
         if (presenter_written && EmissionTraceConfig().pipeline_full_readback &&
             EmissionTraceUnsigned("REX_GTA4_BULB_SWAPCHAIN_PROBE", 0, 1) &&
@@ -37749,7 +38052,7 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
         // Offscreen work may have been submitted successfully without
         // changing this mailbox image. Preserve its completion object for
         // lifetime safety, but do not publish/rotate an unwritten image.
-        return presenter_written;
+        return presenter_written && !framegen_capture;
       },
       ui::GuestOutputProvenance{
           .frame_rate_limit = rex::cvar::Query<uint32_t>("gta4_frame_limit"),
@@ -37769,10 +38072,22 @@ bool Gta4NativeGraphicsSystem::ClearGuestOutput(
           .tv_bink_result = present.diagnostic_tv_bink_result,
           .diagnostic_trace = present.diagnostic_trace != 0,
       });
+  if (framegen_.deferred) {
+    framegen_.deferred = false;
+    framegen_.slot_submission[framegen_.write_slot] = framegen_.readback_submission;
+    framegen_.width = width;
+    framegen_.height = height;
+    framegen_.display_width = display_width;
+    framegen_.display_height = display_height;
+    framegen_.submitted_frame = submitted_frame;
+    framegen_.pending = true;
+    return true;
+  }
   return refresh_result;
 }
 
 void Gta4NativeGraphicsSystem::DestroyNativeRendererObjects() {
+  FrameGenShutdown();
   StopNativePipelineCompiler();
   native_pipeline_lookup_lifetime_.Invalidate();
   if (!provider_) {

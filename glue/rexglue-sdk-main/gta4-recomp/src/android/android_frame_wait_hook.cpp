@@ -79,3 +79,13 @@ extern "C" void sub_82A46D70(PPCContext& ctx, uint8_t* base) {
     nanosleep(&delay, nullptr);
   }
 }
+
+extern "C" void __imp__sub_825225E8(PPCContext& ctx, uint8_t* base);
+
+extern "C" void sub_825225E8(PPCContext& ctx, uint8_t* base) {
+  const uint32_t obj = ctx.r3.u32;
+  const uint32_t saved = REX_LOAD_U32(obj + 2344);
+  REX_STORE_U32(obj + 2344, 0xFFFFFFFFu);
+  __imp__sub_825225E8(ctx, base);
+  REX_STORE_U32(obj + 2344, saved);
+}

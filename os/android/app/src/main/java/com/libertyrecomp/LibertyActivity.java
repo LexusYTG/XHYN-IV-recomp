@@ -215,7 +215,7 @@ public class LibertyActivity extends SDLActivity {
         arguments.removeIf(a -> a.startsWith("--gta4_native_shadow_interval")
                 || a.startsWith("--gta4_native_water_reflection_interval")
                 || a.startsWith("--gta4_native_environment_reflection_interval"));
-        arguments.add("--gta4_native_shadow_interval=" + (shadowsOff ? 0 : 1));
+        arguments.add("--gta4_native_shadow_interval=0");
         arguments.removeIf(a -> a.startsWith("--android_gpu_turbo"));
         arguments.add("--android_gpu_turbo=" + intent.getBooleanExtra(EXTRA_GPU_TURBO, false));
         if (intent.getBooleanExtra(EXTRA_HALF_DRAW_DISTANCE, false)) {
