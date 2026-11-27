@@ -5831,6 +5831,13 @@ Gta4NativeGraphicsSystem::CaptureTextureResourceUncached(
   if (!info.memory.base_address) {
     return reject("base-address");
   }
+  // ift21: sin cadena de mips. Se conservan mip 0 y 1; el skip de mips de mas abajo
+  // descarta el 0 y queda un solo mip a media resolucion. Texturas <64 quedan como estan.
+  if (info.mip_min_level == 0 && info.mip_max_level > 1 &&
+      info.dimension == xenos::DataDimension::k2DOrStacked && !info.is_stacked &&
+      info.width + 1 >= 64 && info.height + 1 >= 64) {
+    info.mip_max_level = 1;
+  }
 
   const FormatInfo* guest_format_info = info.format_info();
   const xenos::TextureFormat base_format = GetBaseFormat(info.format);
@@ -23159,9 +23166,30 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
     const float sun_intensity = read_guest(288 + 12);
     float sun[3] = {read_guest(288), read_guest(292), read_guest(296)};
     if (bake_limit >= 608) {
+      // ift20: tope minimo y maximo de luminancia del ambiente (conserva el tinte).
+      constexpr float kAmbientLumaMin = 0.18f;
+      constexpr float kAmbientLumaMax = 0.90f;
+      float ambient[3];
       for (size_t i = 0; i < 3; ++i) {
-        write_host(592 + i * 4, read_guest(592 + i * 4) + sun[i] * sun_intensity * kSunIntoAmbient);
+        ambient[i] = read_guest(592 + i * 4) + sun[i] * sun_intensity * kSunIntoAmbient;
       }
+      const bool sun_lit =
+          sun_intensity != 0.0f || sun[0] != 0.0f || sun[1] != 0.0f || sun[2] != 0.0f;
+      if (sun_lit) {
+        const float luma = 0.2126f * ambient[0] + 0.7152f * ambient[1] + 0.0722f * ambient[2];
+        if (luma < kAmbientLumaMin) {
+          if (luma > 1e-4f) {
+            const float scale = std::min(kAmbientLumaMin / luma, 8.0f);
+            for (float& channel : ambient) channel *= scale;
+          } else {
+            for (float& channel : ambient) channel = kAmbientLumaMin;
+          }
+        } else if (luma > kAmbientLumaMax) {
+          const float scale = kAmbientLumaMax / luma;
+          for (float& channel : ambient) channel *= scale;
+        }
+      }
+      for (size_t i = 0; i < 3; ++i) write_host(592 + i * 4, ambient[i]);
     }
     if (bake_limit >= 300) {
       write_host(288, 0.0f);
@@ -30749,12 +30777,8 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     return reflection;
   };
 
-  auto performance_range_for_command =
-      [&reflection_for_command](const NativeCommand& command) -> performance::GpuRange {
-    const NativeReflectionTarget* reflection = reflection_for_command(command);
-    if (reflection) {
-      return PerformanceRangeForReflectionFamily(reflection->family);
-    }
+  auto performance_range_after_reflection =
+      [](const NativeCommand& command) -> performance::GpuRange {
     if (command.type == CommandType::kResolve) {
       return performance::GpuRange::kResolve;
     }
@@ -30793,6 +30817,16 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       return performance::GpuRange(memo);
     }
     return performance::GpuRange::kUnattributed;
+  };
+
+  auto performance_range_for_command =
+      [&reflection_for_command, &performance_range_after_reflection](
+          const NativeCommand& command) -> performance::GpuRange {
+    const NativeReflectionTarget* reflection = reflection_for_command(command);
+    if (reflection) {
+      return PerformanceRangeForReflectionFamily(reflection->family);
+    }
+    return performance_range_after_reflection(command);
   };
 
   const auto surface_pass_key = [](const SurfaceDescriptor& descriptor, bool depth) {
@@ -31345,7 +31379,17 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
         (queued_command.type == CommandType::kDrawPrimitive ||
          queued_command.type == CommandType::kDrawPrimitiveUp ||
          queued_command.type == CommandType::kDrawIndexedPrimitive)) {
-      const performance::GpuRange range = performance_range_for_command(queued_command);
+      performance::GpuRange range;
+      if (water_reflection_off || environment_reflection_off || shadows_off) {
+        range = performance_range_for_command(queued_command);
+      } else {
+        // Solo queda vivo el chequeo de kLocalShadowShaders; las familias de
+        // reflexion nunca devuelven ese rango, asi que se saltea la busqueda.
+        range = performance_range_after_reflection(queued_command);
+        if (range == performance::GpuRange::kLocalShadowShaders) {
+          range = performance_range_for_command(queued_command);
+        }
+      }
       if ((water_reflection_off && range == performance::GpuRange::kWaterReflections) ||
           (environment_reflection_off && range == performance::GpuRange::kEnvironmentReflections) ||
           (!diagnostic_frame && range == performance::GpuRange::kLocalShadowShaders) ||
@@ -31379,9 +31423,9 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       const uint32_t bloom_target_width = uint32_t(queued_command.snapshot_render_targets[0].width);
       const bool bloom_chain_draw =
           !diagnostic_frame &&
+          (bloom_target_width == 576 || bloom_target_width == 144 || bloom_target_width == 36) &&
           queued_command.pipeline_state->pixel_shader_resource->filename.find("rage_postfx_e2") !=
-              std::string::npos &&
-          (bloom_target_width == 576 || bloom_target_width == 144 || bloom_target_width == 36);
+              std::string::npos;
       if (bloom_chain_draw || bloom_pass_hash == 0xE74BFC50127AFED3ull || bloom_pass_hash == 0x86CB9F8D0850ABE3ull) {
         continue;
       }
@@ -31432,6 +31476,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
          queued_command.type == CommandType::kDrawPrimitiveUp ||
          queued_command.type == CommandType::kDrawIndexedPrimitive ||
          queued_command.type == CommandType::kClear) &&
+        diagnostic_frame &&  // ift19: no re-hashear el estado por draw en frames normales
         queued_command.recorded_fixed_function_state_hash !=
             HashFixedFunctionState(queued_command.fixed_function_state)) {
       REXLOG_ERROR(
@@ -31448,7 +31493,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
     const NativeCommand* command_pointer = &queued_command;
     constexpr uint64_t kDeferredLightingPs9Hash = 0x23C88DA6F953E36Bull;
     constexpr uint32_t kFillerVolumePointTechnique = 11;
-    const std::string ps9_stencil_probe = REXCVAR_GET(gta4_native_light_ps9_stencil_probe);
+    const std::string& ps9_stencil_probe = REXCVAR_GET(gta4_native_light_ps9_stencil_probe);
     const bool ps9_accumulation_draw =
         queued_command.light_trace_technique == kFillerVolumePointTechnique &&
         queued_command.light_trace_mode == 0 && queued_command.pipeline_state &&
@@ -31498,7 +31543,7 @@ bool Gta4NativeGraphicsSystem::RecordNativeFrame(
       }
     }
 
-    const std::string stencil_face_probe = REXCVAR_GET(gta4_native_light_stencil_face_probe);
+    const std::string& stencil_face_probe = REXCVAR_GET(gta4_native_light_stencil_face_probe);
     constexpr uint64_t kDeferredLightingVs1Hash = 0xA97B1F043F720396ull;
     uint64_t stencil_face_probe_instance = 0;
     if (stencil_face_probe != "original" && queued_command.pipeline_state &&
@@ -37106,7 +37151,8 @@ bool Gta4NativeGraphicsSystem::PublishFrame(
     native_profile_clock_probe_ticks_ = profile::CalibrateCpuClock();
   const bool collect_cpu = detail_requested && title_present &&
       REXCVAR_GET(gta4_profile_native_detailed_cpu) && native_cpu_recorder_.Begin(profile::CpuTick());
-  const profile::CpuRecorderBinding profile_binding(collect_cpu ? &native_cpu_recorder_ : nullptr);
+  // EXPERIMENTO ift18b: sin collect_cpu se pisaba el binding del reporte con nullptr; se conserva el actual.
+  const profile::CpuRecorderBinding profile_binding(collect_cpu ? &native_cpu_recorder_ : profile::current_cpu_recorder);
   auto finish_cpu_detail = MakeScopeExit([&] {
     const uint64_t snapshot_begin = detail_requested ? profile::CpuTick() : 0;
     auto detail = collect_cpu ? native_cpu_recorder_.Finish(snapshot_begin, native_profile_clock_probe_ticks_)
