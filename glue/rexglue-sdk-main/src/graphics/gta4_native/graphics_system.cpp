@@ -812,7 +812,7 @@ void LogNativeCpuBreakdown(const char* tag, const profile::CpuFrameData& data,
   std::sort(cells.begin(), cells.end(),
             [&](size_t left, size_t right) { return self[left] > self[right]; });
   std::string report;
-  for (size_t i = 0; i < cells.size() && i < 12; ++i) {
+  for (size_t i = 0; i < cells.size() && i < 24; ++i) {
     const size_t cell = cells[i];
     report += fmt::format(" {}={:.1f}/{:.1f}({:.0f})",
                           profile::CpuOpName(profile::CpuOp(cell % profile::kCpuOpCount)),
@@ -7410,6 +7410,52 @@ void Gta4NativeGraphicsSystem::FrameRecorderMain() {
     const uint32_t timeline_frame = job->present.submitted_frame;
     recording_ring_serial_ = job->ring_serial;
     MarkFrameTimeline(timeline_frame, kTimelineRecorderStart);
+    // EXPERIMENTO ift18: el reporte cubre todo el frame del recorder (fence, Prepare*, Release*).
+    const profile::CpuPhaseScope ift18_phase(profile::CpuPhase::kRecording);
+    std::optional<profile::CpuRecorderBinding> cpu_report_binding;
+    const bool cpu_report_enabled =
+        (REXCVAR_GET(gta4_native_cpu_report) || REXCVAR_GET(gta4_native_frame_timeline)) &&
+        !profile::current_cpu_recorder;
+    if (cpu_report_enabled) {
+      cpu_report_recorder_.Begin(profile::CpuTick());
+      cpu_report_binding.emplace(&cpu_report_recorder_);
+    }
+    const auto cpu_report_exit = MakeScopeExit([this, cpu_report_enabled] {
+      if (!cpu_report_enabled) return;
+      const profile::CpuFrameData data = cpu_report_recorder_.Finish(profile::CpuTick());
+      struct Accumulator {
+        std::array<uint64_t, profile::kCpuCellCount> inclusive{};
+        std::array<uint64_t, profile::kCpuCellCount> self{};
+        std::array<uint64_t, profile::kCpuCellCount> calls{};
+        uint64_t wall_ticks = 0;
+        uint32_t frames = 0;
+      };
+      static Accumulator accumulator;  // One recorder thread.
+      accumulator.wall_ticks += data.end - data.begin;
+      for (const profile::CpuMeasurement& measurement : data.measurements) {
+        const size_t cell =
+            size_t(measurement.phase) * profile::kCpuOpCount + size_t(measurement.op);
+        accumulator.inclusive[cell] += measurement.inclusive_ticks;
+        accumulator.self[cell] += measurement.self_ticks;
+        accumulator.calls[cell] += measurement.calls;
+      }
+      if (++accumulator.frames < 120) return;
+      profile::CpuFrameData summary;
+      summary.begin = 0;
+      summary.end = accumulator.wall_ticks;
+      for (size_t cell = 0; cell < profile::kCpuCellCount; ++cell) {
+        if (!accumulator.calls[cell]) continue;
+        profile::CpuMeasurement measurement;
+        measurement.phase = profile::CpuPhase(cell / profile::kCpuOpCount);
+        measurement.op = profile::CpuOp(cell % profile::kCpuOpCount);
+        measurement.calls = accumulator.calls[cell];
+        measurement.self_ticks = accumulator.self[cell];
+        measurement.inclusive_ticks = accumulator.inclusive[cell];
+        summary.measurements.push_back(measurement);
+      }
+      LogNativeCpuBreakdown("recorder-full", summary, accumulator.frames);
+      accumulator = {};
+    });
     RunReleaseEffects(recording_release_effects_);
     BeginModernShaderFrame();
     FinishPresent(*job->present_command, job->present);
