@@ -19506,6 +19506,9 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     return NativePreparedTextureInputsEqual(previous, next);
   };
   const bool use_prepared_draw_cache = REXCVAR_GET(gta4_native_prepared_binding_cache);
+  const bool light_probe_room = REXCVAR_GET(gta4_native_light_color_delta_probe) == "room";  // ift23
+  const bool translucency_diag =
+      CachedDiagnosticsEnabled(rex::diagnostics::Category::kNativeTranslucency);  // ift23
   const auto prepared_draw_slot = [](const NativeCommand& draw) {
     if (draw.texture_inputs_signature) return size_t(draw.texture_inputs_signature >> 60);
     uint64_t hash = uint64_t(draw.used_texture_mask) * 0x9E3779B97F4A7C15ull;
@@ -19632,6 +19635,13 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
   }
 
   const bool prefetch_commands = REXCVAR_GET(gta4_native_recorder_prefetch);
+  // ift23: fuera del loop por draw. Cada draw reescribe los 5 arrays completos
+  // (todos los stages) antes de leerlos, no hace falta ponerlos en cero por draw.
+  std::array<VkDescriptorImageInfo, kShaderTextureCount> images_2d{};
+  std::array<VkDescriptorImageInfo, kShaderTextureCount> images_2d_array{};
+  std::array<VkDescriptorImageInfo, kShaderTextureCount> images_3d{};
+  std::array<VkDescriptorImageInfo, kShaderTextureCount> images_cube{};
+  std::array<VkDescriptorImageInfo, kShaderTextureCount> samplers{};
   for (size_t command_index = 0; command_index < texture_commands.size(); ++command_index) {
     if (prefetch_commands && command_index + 4 < texture_commands.size()) {
       // See RecordNativeFrame: the walk is bound by first touches of commands.
@@ -19687,7 +19697,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     const NativeShader* alpha_card_pixel_shader =
         command.pipeline_state ? command.pipeline_state->pixel_shader_resource : nullptr;
     const bool trace_alpha_card =
-        CachedDiagnosticsEnabled(rex::diagnostics::Category::kNativeTranslucency) &&
+        translucency_diag &&
         ShouldCaptureDiagnosticFrame(submitted_frame) && alpha_card_pixel_shader &&
         IsAlphaTestRequested(command.fixed_function_state.alpha_test_enable,
                              command.fixed_function_state.alpha_function);
@@ -19698,11 +19708,6 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
       alpha_card_category = ClassifyAlphaCardDiagnosticShader(alpha_card_pixel_shader->filename);
     }
 
-    std::array<VkDescriptorImageInfo, kShaderTextureCount> images_2d{};
-    std::array<VkDescriptorImageInfo, kShaderTextureCount> images_2d_array{};
-    std::array<VkDescriptorImageInfo, kShaderTextureCount> images_3d{};
-    std::array<VkDescriptorImageInfo, kShaderTextureCount> images_cube{};
-    std::array<VkDescriptorImageInfo, kShaderTextureCount> samplers{};
     std::array<uint64_t, kShaderTextureCount> image_lifetimes{};
     command.descriptor_page = UINT32_MAX;
     command.image_descriptor_epoch = 0;
@@ -19721,7 +19726,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     const bool capture_fire_bindings = FireTraceConfig().enabled &&
         (command.fire_trace || submitted_frame % FireTraceConfig().interval == 0);
     if (capture_fire_bindings || capture_bulb_bindings || TvCommandRole(command) || (PhoneTraceConfig().lineage && command.phone_trace) ||
-        (REXCVAR_GET(gta4_native_light_color_delta_probe) == "room" && !room_light_probe_stop_requested_ &&
+        (light_probe_room && !room_light_probe_stop_requested_ &&
          command.pipeline_state && command.pipeline_state->pixel_shader_resource &&
          IsDeferredLightShaderFilename(command.pipeline_state->pixel_shader_resource->filename))) {
       command.room_light_input_bindings =
@@ -19732,6 +19737,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
     command.guest_null_texture_mask = 0;
     command.failed_texture_mask = 0;
     command.bindings_prepared = false;
+    const bool hove_candidate = IsHoveGantryGeometryCandidate(command);  // ift23
     for (uint32_t stage = 0; stage < kShaderTextureCount; ++stage) {
       images_2d[stage] = {VK_NULL_HANDLE, null_texture_2d_.view,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -19815,7 +19821,7 @@ bool Gta4NativeGraphicsSystem::PrepareFrameTextures(VkCommandBuffer command_buff
         if (sampler) {
           samplers[stage].sampler = sampler->sampler;
         }
-        if (IsHoveGantryGeometryCandidate(command)) {
+        if (hove_candidate) {
           static std::atomic<uint64_t> hove_sample_bind_count{0};
           const uint64_t hit = ++hove_sample_bind_count;
           if (hit <= 512) {
@@ -23303,22 +23309,27 @@ bool Gta4NativeGraphicsSystem::BindCommonDrawState(
       command.shader_state->versions.Get(DirtyStateComponent::kBooleanConstants);
   shared_key.image_descriptor_epoch = command.image_descriptor_epoch;
   shared_key.sampler_descriptor_epoch = command.sampler_descriptor_epoch;
+  // ift23: invariantes del loop de stages (antes se recalculaban 16 veces por draw).
+  const float max_sampler_lod_bias = vulkan_device->properties().maxSamplerLodBias;
+  const auto* bias_vertex_shader =
+      command.pipeline_state ? command.pipeline_state->vertex_shader_resource : nullptr;
+  const uint32_t vertex_textures = bias_vertex_shader
+      ? bias_vertex_shader->used_texture_mask | bias_vertex_shader->override_used_texture_mask : 0;
+  const float plain_mip_bias = temporal::ReconstructionMipBias(temporal_configuration_, false);
   for (uint32_t stage = 0; stage < kShaderTextureCount; ++stage) {
     const auto& texture = command.textures[stage];
-    const auto* vertex_shader = command.pipeline_state ? command.pipeline_state->vertex_shader_resource : nullptr;
-    const uint32_t vertex_textures = vertex_shader
-        ? vertex_shader->used_texture_mask | vertex_shader->override_used_texture_mask : 0;
     const bool material = target.temporal_jitter && texture && texture->mip_levels.size() > 1 &&
         texture->info.dimension == xenos::DataDimension::k2DOrStacked && !texture->gpu_produced &&
         !texture->virtual_lifetime && !texture->vector_font_replacement &&
         (command.used_texture_mask & (1u << stage)) && !(vertex_textures & (1u << stage));
     const float bias = NativeSamplerLodBias(command.texture_fetches[stage].lod_bias,
-        vulkan_device->properties().maxSamplerLodBias) +
-        temporal::ReconstructionMipBias(temporal_configuration_, material);
+        max_sampler_lod_bias) +
+        (material ? temporal::ReconstructionMipBias(temporal_configuration_, true)
+                  : plain_mip_bias);
     // Bias is applied in translated SampleBias instructions, so its effective
     // value belongs to this shared-constant key, not the zero-bias VkSampler.
     shared_key.sampler_lod_bias_bits[stage] = std::bit_cast<uint32_t>(std::clamp(bias,
-        -vulkan_device->properties().maxSamplerLodBias, vulkan_device->properties().maxSamplerLodBias));
+        -max_sampler_lod_bias, max_sampler_lod_bias));
   }
   shared_key.cached_descriptor_epoch = command.cached_descriptor_epoch;
   if (modern_shader_frame_.settings().enabled && !fusion_tone_lut_.buffer) {

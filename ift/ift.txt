@@ -18,3 +18,4 @@
 0018 | 2026-11-26 21:02 | pendiente | RecordNativeFrame 31405: std::string = REXCVAR_GET(gta4_native_light_ps9_stencil_probe) por CADA comando. Sin leer costo de REXCVAR_GET string (lock?). Candidato a sacar del loop
 0019 | 2026-11-26 21:31 | pendiente | Timeline jugando: recorder start->submit ~100 ms (marca el ritmo); RecordNativeFrame wall 37-50 ms; faltan ~50 ms fuera (fence/Prepare*/Release*). Parche ift18 mide el frame entero. Hipotesis: fence = GPU.
 0020 | 2026-11-26 22:19 | pendiente | ift22: performance_range_for_command fuera del camino por draw en frames normales (solo busca reflexion si el rango barato es kLocalShadowShaders)
+0021 | 2026-11-26 22:23 | pendiente | ift23: PrepareFrameTextures y BindCommonDrawState sin trabajo repetido por draw (5 arrays fuera del loop, Hove 1 vez por draw, cvar room/diag translucency 1 vez, invariantes del loop de 16 stages de lod bias)
